@@ -7,14 +7,20 @@ from .video_pipeline import (
     select_keyframes_by_relative_l2,
 )
 from .video_processor import (
+    AICVideoPipeline,
+    AutoShotDetector,
     BasicShotDetector,
     DeterministicRetrievalEmbedder,
     DeterministicTemporalAligner,
     MockOCRCaptioner,
+    OpenCVFrameSampler,
     RelativeL2KeyframeSelector,
     SyntheticASRProcessor,
     SyntheticFrameSampler,
+    TemporalAlignerImpl,
+    VisionCaptionOCR,
     VideoPreprocessor,
+    WhisperASRProcessor,
 )
 
 __all__ = [
@@ -22,12 +28,18 @@ __all__ = [
     "rrfsum",
     "same_video_temporal_boost",
     "select_keyframes_by_relative_l2",
+    "OpenCVFrameSampler",
+    "AutoShotDetector",
     "BasicShotDetector",
-    "DeterministicRetrievalEmbedder",
-    "DeterministicTemporalAligner",
-    "MockOCRCaptioner",
     "RelativeL2KeyframeSelector",
+    "VisionCaptionOCR",
+    "MockOCRCaptioner",
+    "DeterministicRetrievalEmbedder",
+    "WhisperASRProcessor",
     "SyntheticASRProcessor",
+    "TemporalAlignerImpl",
+    "DeterministicTemporalAligner",
     "SyntheticFrameSampler",
+    "AICVideoPipeline",
     "VideoPreprocessor",
 ]
