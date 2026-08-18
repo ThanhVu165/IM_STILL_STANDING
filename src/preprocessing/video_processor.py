@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import subprocess
-from dataclasses import dataclass
+import json
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -549,6 +550,35 @@ class AICVideoPipeline:
         asr_segments = list(self.asr_processor.transcribe(video_path))
         records = list(self.temporal_aligner.align(with_embeddings, asr_segments))
         return shots, records
+
+    def run(
+        self,
+        video_path: str,
+        *,
+        output_dir: str | Path | None = None,
+        write_json: bool = True,
+    ) -> dict[str, Any]:
+        """Execute the full offline AIC processing flow and return a JSON-serializable manifest."""
+        shots, records = self.process(video_path)
+        manifest: dict[str, Any] = {
+            "video_path": str(video_path),
+            "use_real_models": bool(self.use_real_models),
+            "stages": list(self.stages),
+            "shots": [asdict(shot) for shot in shots],
+            "keyframes": [asdict(record) for record in records],
+            "summary": {
+                "shot_count": len(shots),
+                "keyframe_count": len(records),
+            },
+        }
+        if write_json and output_dir is not None:
+            output_path = Path(output_dir)
+            output_path.mkdir(parents=True, exist_ok=True)
+            manifest_path = output_path / f"{Path(video_path).stem}_pipeline.json"
+            with manifest_path.open("w", encoding="utf-8") as handle:
+                json.dump(manifest, handle, indent=2, ensure_ascii=False)
+            manifest["manifest_path"] = str(manifest_path)
+        return manifest
 
 
 SyntheticFrameSampler = OpenCVFrameSampler
