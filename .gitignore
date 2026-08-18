@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Local data and generated outputs
+data/*
+!data/README.md
+!data/.gitkeep
+!data/raw/
+!data/raw/videos/
+!data/raw/videos/.gitkeep
+!data/raw/queries/
+!data/raw/queries/.gitkeep
+!data/processed/
+!data/processed/keyframes/
+!data/processed/keyframes/.gitkeep
+!data/processed/embeddings/
+!data/processed/embeddings/.gitkeep
+!data/metadata/
+!data/metadata/.gitkeep
+!data/outputs/
+!data/outputs/.gitkeep
+
+# OS/editor junk
+.DS_Store
+Thumbs.db
