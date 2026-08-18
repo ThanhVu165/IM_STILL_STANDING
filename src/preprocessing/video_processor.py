@@ -547,8 +547,10 @@ class AICVideoPipeline:
         retrieval_embedder: RetrievalEmbedder | None = None,
         asr_processor: ASRProcessor | None = None,
         temporal_aligner: TemporalAligner | None = None,
+        organizer_root: str | Path | None = None,
     ) -> None:
         self.use_real_models = use_real_models
+        self.organizer_root = Path(organizer_root) if organizer_root is not None else None
         self.shot_detector = shot_detector or AutoShotDetector()
         self.frame_sampler = frame_sampler or OpenCVFrameSampler()
         self.keyframe_selector = keyframe_selector or RelativeL2KeyframeSelector(use_real_models=self.use_real_models)
@@ -556,6 +558,75 @@ class AICVideoPipeline:
         self.retrieval_embedder = retrieval_embedder or DeterministicRetrievalEmbedder(use_real_models=self.use_real_models)
         self.asr_processor = asr_processor or WhisperASRProcessor(use_real_models=self.use_real_models)
         self.temporal_aligner = temporal_aligner or TemporalAlignerImpl()
+
+    def _load_organizer_artifacts(self, video_path: str) -> tuple[list[ShotRecord], list[KeyframeRecord]] | None:
+        if self.organizer_root is None:
+            return None
+
+        root = Path(self.organizer_root)
+        video_file = Path(video_path)
+        stem = video_file.stem
+        keyframe_dir = root / "processed" / "keyframes" / stem
+        if not keyframe_dir.exists():
+            return None
+
+        frame_files = sorted(
+            path for path in keyframe_dir.iterdir() if path.is_file() and path.suffix.lower() in {".jpg", ".jpeg", ".png", ".bmp"}
+        )
+        if not frame_files:
+            return None
+
+        records: list[KeyframeRecord] = []
+        for frame_file in frame_files:
+            frame_index = int(frame_file.stem) if frame_file.stem.isdigit() else 0
+            record = KeyframeRecord(
+                video_id=stem,
+                frame_id=frame_index,
+                timestamp=float(frame_index) / 30.0,
+                image_ref=str(frame_file),
+                shot_id=f"shot_{frame_index // 10}",
+                metadata={"source": "organizer-keyframes"},
+            )
+            records.append(record)
+
+        clip_file = root / "processed" / "embeddings" / f"{stem}.npy"
+        if clip_file.exists():
+            try:
+                embeddings = np.load(clip_file)
+                if embeddings.ndim == 2 and len(embeddings) >= len(records):
+                    for index, record in enumerate(records[: len(embeddings)]):
+                        record.clip_embedding = [float(value) for value in np.asarray(embeddings[index]).tolist()]
+            except Exception:
+                pass
+
+        metadata_file = root / "metadata" / f"{stem}.json"
+        if metadata_file.exists():
+            try:
+                with metadata_file.open("r", encoding="utf-8") as handle:
+                    payload = json.load(handle)
+                if isinstance(payload, dict):
+                    for record in records:
+                        record.metadata = payload
+            except Exception:
+                pass
+
+        shots: list[ShotRecord] = []
+        if len(records) > 1:
+            for idx in range(0, len(records), max(1, len(records) // 4)):
+                chunk = records[idx : idx + max(1, len(records) // 4)]
+                if not chunk:
+                    continue
+                shots.append(
+                    ShotRecord(
+                        video_id=stem,
+                        shot_id=f"shot_{len(shots)}",
+                        start_time=chunk[0].timestamp,
+                        end_time=chunk[-1].timestamp,
+                        start_frame=chunk[0].frame_id,
+                        end_frame=chunk[-1].frame_id,
+                    )
+                )
+        return shots, records
 
     @property
     def stages(self) -> list[str]:
@@ -575,6 +646,14 @@ class AICVideoPipeline:
         ]
 
     def process(self, video_path: str) -> tuple[list[ShotRecord], list[KeyframeRecord]]:
+        organizer_data = self._load_organizer_artifacts(video_path)
+        if organizer_data is not None:
+            shots, records = organizer_data
+            asr_segments = list(self.asr_processor.transcribe(video_path))
+            if records:
+                records = list(self.temporal_aligner.align(records, asr_segments))
+            return shots, records
+
         shots = list(self.shot_detector.detect(video_path))
         sampled = list(self.frame_sampler.sample(video_path, step=8))
         selected = list(self.keyframe_selector.select(sampled))
