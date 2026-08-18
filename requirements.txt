@@ -1,0 +1,24 @@
+# Core scientific stack
+numpy>=1.26.0
+opencv-python>=4.10.0
+Pillow>=10.0.0
+
+# ML / transformers
+torch>=2.2.0
+transformers>=4.43.0
+sentence-transformers>=3.0.0
+accelerate>=0.33.0
+huggingface_hub>=0.24.0
+
+# Vector / backend stores
+pymilvus>=2.4.0
+elasticsearch>=8.14.0
+redis>=5.0.0
+
+# Utilities
+requests>=2.32.0
+python-dotenv>=1.0.0
+PyYAML>=6.0.0
+
+# Dev/test
+pytest>=8.0.0
