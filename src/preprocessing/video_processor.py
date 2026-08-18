@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Sequence
 
 import numpy as np
+import torch
 from PIL import Image
 
 from src.preprocessing.interfaces import (
@@ -73,6 +74,14 @@ def _read_frame_from_ref(image_ref: str) -> Image.Image | None:
         except Exception:
             return None
     return None
+
+
+def _active_device() -> str:
+    return "cuda" if torch.cuda.is_available() else "cpu"
+
+
+def _torch_dtype_for_device(device: str) -> torch.dtype:
+    return torch.float16 if device == "cuda" and torch.cuda.is_available() else torch.float32
 
 
 class OpenCVFrameSampler(FrameSampler):
@@ -218,10 +227,13 @@ class RelativeL2KeyframeSelector(KeyframeSelector):
             return None
         if self._model is not None:
             return self._model
+        device = _active_device()
         try:
             from sentence_transformers import SentenceTransformer
 
-            self._model = SentenceTransformer(self.model_name)
+            self._model = SentenceTransformer(self.model_name, device=device)
+            if device == "cuda":
+                self._model.to(torch.device(device))
             return self._model
         except Exception:
             self._model = False
@@ -260,10 +272,16 @@ class VisionCaptionOCR(OCRCaptioner):
             return None
         if self._captioner is not None:
             return self._captioner
+        device = _active_device()
         try:
             from transformers import pipeline
 
-            self._captioner = pipeline("image-to-text", model="Salesforce/blip-image-captioning-base")
+            self._captioner = pipeline(
+                "image-to-text",
+                model="Salesforce/blip-image-captioning-base",
+                device=0 if device == "cuda" else -1,
+                model_kwargs={"torch_dtype": _torch_dtype_for_device(device)},
+            )
             return self._captioner
         except Exception:
             self._captioner = False
@@ -311,10 +329,13 @@ class DeterministicRetrievalEmbedder(RetrievalEmbedder):
             return None
         if self._clip_model is not None:
             return self._clip_model
+        device = _active_device()
         try:
             from sentence_transformers import SentenceTransformer
 
-            self._clip_model = SentenceTransformer("clip-ViT-L-14")
+            self._clip_model = SentenceTransformer("clip-ViT-L-14", device=device)
+            if device == "cuda":
+                self._clip_model.to(torch.device(device))
             return self._clip_model
         except Exception:
             self._clip_model = False
@@ -325,11 +346,17 @@ class DeterministicRetrievalEmbedder(RetrievalEmbedder):
             return None, None
         if self._siglip_model is not None:
             return self._siglip_model, self._siglip_processor
+        device = _active_device()
         try:
             from transformers import AutoModel, AutoProcessor
 
             processor = AutoProcessor.from_pretrained("google/siglip2-base-patch16-224")
-            model = AutoModel.from_pretrained("google/siglip2-base-patch16-224")
+            model = AutoModel.from_pretrained(
+                "google/siglip2-base-patch16-224",
+                torch_dtype=_torch_dtype_for_device(device),
+            )
+            if device == "cuda":
+                model.to(torch.device(device))
             self._siglip_processor = processor
             self._siglip_model = model
             return model, processor
@@ -386,10 +413,16 @@ class WhisperASRProcessor(ASRProcessor):
             return None
         if self._pipeline is not None:
             return self._pipeline
+        device = _active_device()
         try:
             from transformers import pipeline
 
-            self._pipeline = pipeline("automatic-speech-recognition", model="openai/whisper-base")
+            self._pipeline = pipeline(
+                "automatic-speech-recognition",
+                model="openai/whisper-base",
+                device=0 if device == "cuda" else -1,
+                torch_dtype=_torch_dtype_for_device(device),
+            )
             return self._pipeline
         except Exception:
             self._pipeline = False
