@@ -59,16 +59,23 @@ class VideoRetrievalPipeline:
         collection_name: str = "video_keyframes",
         index_name: str = "video_keyframes",
         data_root: str | Path | None = None,
+        index_root: str | Path | None = None,
         cache_prefix: str = "video_query:",
+        load_index_only: bool = False,
     ) -> None:
         self.data_root = Path(data_root) if data_root is not None else Path("data")
+        self.index_root = Path(index_root) if index_root is not None else self.data_root / "indexes"
+        self.index_root.mkdir(parents=True, exist_ok=True)
+        faiss_path = self.index_root / f"{collection_name}.npy"
+        sqlite_path = self.index_root / f"{index_name}.sqlite"
         self.milvus = FaissVectorAdapter(
-            milvus_client if milvus_client is not None else {},
+            milvus_client if milvus_client is not None else str(faiss_path),
             collection_name,
         )
         self.elasticsearch = SQLiteTextAdapter(
             elasticsearch_client if elasticsearch_client is not None else {},
             index_name,
+            db_path=sqlite_path,
         )
         self.redis_cache = RedisResultCache(redis_client if redis_client is not None else {})
         self.collection_name = collection_name
@@ -76,16 +83,76 @@ class VideoRetrievalPipeline:
         self.cache_prefix = cache_prefix
         self._records: list[KeyframeRecord] = list(records) if records is not None else []
         self._records_by_video: dict[str, list[KeyframeRecord]] = defaultdict(list)
-        if not self._records:
-            self._load_records_from_disk()
-        else:
+        if records is not None:
             self._index_records(self._records)
+        elif load_index_only:
+            self._load_records_from_index()
+        else:
+            self._load_records_from_disk()
+            if self._records:
+                self._index_records(self._records)
 
     def _index_records(self, records: Sequence[KeyframeRecord]) -> None:
         for record in records:
             self._records_by_video[str(record.video_id)].append(record)
         self.milvus.upsert(records)
         self.elasticsearch.upsert(records)
+
+    def _load_records_from_index(self) -> None:
+        vector_docs = list(getattr(self.milvus, "_documents", []))
+        if not vector_docs:
+            self._records = []
+            self._records_by_video = defaultdict(list)
+            return
+
+        key_to_record: dict[tuple[str, int], KeyframeRecord] = {}
+        for doc in vector_docs:
+            key = (str(doc.get("video_id", "")), int(doc.get("frame_id", 0)))
+            record = KeyframeRecord(
+                video_id=str(doc.get("video_id", "")),
+                frame_id=int(doc.get("frame_id", 0)),
+                timestamp=float(doc.get("timestamp") or 0.0),
+                image_ref=str(doc.get("image_ref") or ""),
+                clip_embedding=[float(value) for value in (doc.get("clip_embedding") or [])],
+                siglip2_embedding=[float(value) for value in (doc.get("siglip2_embedding") or [])],
+            )
+            key_to_record[key] = record
+
+        rows = self.elasticsearch._conn.execute(
+            "SELECT video_id, frame_id, timestamp, image_ref, ocr, caption, asr, metadata_json FROM keyframes"
+        ).fetchall()
+        for row in rows:
+            key = (str(row[0]), int(row[1]))
+            record = key_to_record.get(key)
+            if record is None:
+                record = KeyframeRecord(
+                    video_id=str(row[0]),
+                    frame_id=int(row[1]),
+                    timestamp=float(row[2] or 0.0),
+                    image_ref=str(row[3] or ""),
+                )
+                key_to_record[key] = record
+
+            record.ocr = row[4] or None
+            record.caption = row[5] or None
+            record.asr = row[6] or None
+            metadata_json = row[7]
+            record.metadata = json.loads(metadata_json) if metadata_json else {}
+            key_to_record[key] = record
+
+        self._records = list(key_to_record.values())
+        self._records_by_video = defaultdict(list)
+        for record in self._records:
+            self._records_by_video[str(record.video_id)].append(record)
+
+    def build_index(self) -> list[KeyframeRecord]:
+        self._records = []
+        self._records_by_video = defaultdict(list)
+        self._load_records_from_disk()
+        if not self._records:
+            return []
+        self._index_records(self._records)
+        return list(self._records)
 
     def _load_records_from_disk(self) -> None:
         root = self.data_root

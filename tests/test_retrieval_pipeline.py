@@ -81,3 +81,33 @@ def test_video_retrieval_pipeline_supports_temporal_reranking() -> None:
     assert results
     assert results[0].video_id == "L21_V001"
     assert results[0].frame_id == 11
+
+
+def test_video_retrieval_pipeline_can_load_persisted_index(tmp_path) -> None:
+    records = [
+        KeyframeRecord(
+            video_id="L21_V001",
+            frame_id=1,
+            timestamp=1.0,
+            image_ref="/tmp/frame_1.jpg",
+            ocr="red shirt",
+            caption="person wearing a red shirt",
+            asr="red shirt",
+            clip_embedding=[1.0, 0.0, 0.0],
+            siglip2_embedding=[1.0, 0.0, 0.0],
+            metadata={"scene": "studio"},
+        ),
+    ]
+
+    data_root = tmp_path / "data"
+    index_root = data_root / "indexes"
+    pipeline = VideoRetrievalPipeline(records=records, data_root=data_root, index_root=index_root)
+    assert (index_root / "video_keyframes.npy").exists()
+    assert (index_root / "video_keyframes.sqlite").exists()
+
+    reloaded = VideoRetrievalPipeline(data_root=data_root, index_root=index_root, load_index_only=True)
+    results = reloaded.search("red shirt", top_k=5)
+
+    assert results
+    assert results[0].video_id == "L21_V001"
+    assert results[0].frame_id == 1
