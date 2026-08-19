@@ -28,21 +28,23 @@ The preliminary-round evaluation allows up to 100 ranked answers per query. Fina
 ## 3. Offline video-processing pipeline
 
 ```text
-RAW VIDEO
-  -> AutoShot shot detection
+ORGANIZER ARTIFACTS (default path)
+  -> keyframes + CLIP .npy + metadata/object JSON
+  -> optional ASR alignment when raw video is available
+  -> multimodal keyframe records
+  -> FAISS + SQLite/FTS + Redis
+
+RAW VIDEO FALLBACK (explicit or when artifacts are incomplete)
   -> sample every 8 frames
   -> CLIP ViT-L/14-quickgelu candidate embeddings
   -> relative L2-difference filtering (retain when rel_diff > 0.4)
   -> KEYFRAMES
-  -> Qwen2.5-VL-3B-Instruct OCR
-  -> Qwen2.5-VL-3B-Instruct caption / scene description
-  -> CLIP DFN5B 1024-d embedding
-  -> SigLIP2 1152-d embedding
-  -> audio extraction
+  -> OCR/caption
+  -> CLIP retrieval embedding branch
+  -> SigLIP2 retrieval embedding branch
   -> Whisper timestamped ASR
   -> temporal alignment of ASR to keyframes
   -> multimodal keyframe records
-  -> FAISS + SQLite/FTS + Redis
 ```
 
 Important: the CLIP used for keyframe selection is distinct from the CLIP used for retrieval.
@@ -344,6 +346,18 @@ TRAKE: query_id, rank, video_id, frame_1, ..., frame_n
 ```
 
 Then convert to the exact organizer-required submission format at export time.
+
+Current CLI supports this boundary directly:
+
+```text
+python src\run_preliminary_tasks.py --task tkis --query-id q1 --query "..." --submission-dir data\outputs
+```
+
+If internal frame IDs are zero-based, conversion must be explicit:
+
+```text
+python src\run_preliminary_tasks.py ... --submission-dir data\outputs --internal-zero-based
+```
 
 ## 14. FiftyOne
 

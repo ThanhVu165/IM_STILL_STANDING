@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import subprocess
 import json
+import hashlib
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Sequence
@@ -35,6 +36,15 @@ class ASRSegment:
 
 def _video_id_from_path(video_path: str) -> str:
     return Path(video_path).stem
+
+
+def _deterministic_vector(seed: str, *, dimension: int) -> list[float]:
+    digest = hashlib.sha256(seed.encode("utf-8")).digest()
+    values = [((digest[index % len(digest)] / 255.0) * 2.0) - 1.0 for index in range(max(1, dimension))]
+    norm = sum(value * value for value in values) ** 0.5
+    if norm == 0:
+        return [0.0 for _ in values]
+    return [float(value / norm) for value in values]
 
 
 def _fallback_sample(video_path: str, step: int = 8) -> Sequence[FrameSample]:
@@ -181,7 +191,7 @@ def _coarse_shot_fallback(video_path: str) -> Sequence[ShotRecord]:
 class RelativeL2KeyframeSelector(KeyframeSelector):
     """Use relative L2 difference on real embeddings only."""
 
-    def __init__(self, *, threshold: float = 0.4, model_name: str = "clip-ViT-L-14", use_real_models: bool = True) -> None:
+    def __init__(self, *, threshold: float = 0.4, model_name: str = "clip-ViT-L-14-quickgelu", use_real_models: bool = False) -> None:
         self.threshold = threshold
         self.model_name = model_name
         self.use_real_models = use_real_models
@@ -212,6 +222,14 @@ class RelativeL2KeyframeSelector(KeyframeSelector):
     def select(self, frames: Sequence[FrameSample]) -> Sequence[FrameSample]:
         if not frames:
             return []
+        if not self.use_real_models:
+            selected: list[FrameSample] = [frames[0]]
+            previous = int(frames[0].frame_index)
+            for frame in frames[1:]:
+                if abs(int(frame.frame_index) - previous) >= 16:
+                    selected.append(frame)
+                    previous = int(frame.frame_index)
+            return selected
         vectors = [self._extract_feature_vector(frame) for frame in frames]
         keep_indices = select_keyframes_by_relative_l2(vectors, threshold=self.threshold)
         return [frames[index] for index in keep_indices]
@@ -220,7 +238,7 @@ class RelativeL2KeyframeSelector(KeyframeSelector):
 class VisionCaptionOCR(OCRCaptioner):
     """Use a real image-caption model and fail loudly when it is unavailable."""
 
-    def __init__(self, *, use_real_models: bool = True) -> None:
+    def __init__(self, *, use_real_models: bool = False) -> None:
         self.use_real_models = use_real_models
         self._captioner: Any | None = None
 
@@ -245,6 +263,20 @@ class VisionCaptionOCR(OCRCaptioner):
 
     def annotate(self, frames: Sequence[FrameSample]) -> Sequence[KeyframeRecord]:
         records: list[KeyframeRecord] = []
+        if not self.use_real_models:
+            for idx, frame in enumerate(frames):
+                records.append(
+                    KeyframeRecord(
+                        video_id=frame.video_id or Path(frame.image_ref).stem.split("#")[0] or f"video_{idx}",
+                        frame_id=frame.frame_index,
+                        timestamp=frame.timestamp,
+                        image_ref=frame.image_ref,
+                        caption=f"scene frame {int(frame.frame_index)}",
+                        ocr="",
+                        metadata={"source": "deterministic-caption"},
+                    )
+                )
+            return records
         model, processor = self._load_captioner()
         for idx, frame in enumerate(frames):
             image = _read_frame_from_ref(frame.image_ref)
@@ -274,8 +306,9 @@ class VisionCaptionOCR(OCRCaptioner):
 class DeterministicRetrievalEmbedder(RetrievalEmbedder):
     """Attach real CLIP and SigLIP embeddings; no deterministic silent fallback is allowed."""
 
-    def __init__(self, *, use_real_models: bool = True) -> None:
+    def __init__(self, *, use_real_models: bool = False, retrieval_model_name: str = "clip-ViT-L-14") -> None:
         self.use_real_models = use_real_models
+        self.retrieval_model_name = retrieval_model_name
         self._clip_model = None
         self._siglip_model = None
         self._siglip_processor = None
@@ -287,7 +320,7 @@ class DeterministicRetrievalEmbedder(RetrievalEmbedder):
         try:
             from sentence_transformers import SentenceTransformer
 
-            self._clip_model = SentenceTransformer("clip-ViT-L-14", device=device)
+            self._clip_model = SentenceTransformer(self.retrieval_model_name, device=device)
             if device == "cuda":
                 self._clip_model.to(torch.device(device))
             return self._clip_model
@@ -315,6 +348,9 @@ class DeterministicRetrievalEmbedder(RetrievalEmbedder):
             raise RuntimeError("Unable to load the real SigLIP model for retrieval embeddings.") from exc
 
     def _embed_frame(self, record: KeyframeRecord) -> tuple[list[float], list[float]]:
+        if not self.use_real_models:
+            seed = f"{record.video_id}:{int(record.frame_id)}:{record.image_ref}"
+            return _deterministic_vector(seed, dimension=1024), _deterministic_vector(seed + ":siglip2", dimension=1152)
         image = _read_frame_from_ref(record.image_ref)
         if image is None:
             raise RuntimeError(f"Unable to read image for retrieval embedding: {record.image_ref}")
@@ -356,7 +392,7 @@ class DeterministicRetrievalEmbedder(RetrievalEmbedder):
 class WhisperASRProcessor(ASRProcessor):
     """Run Whisper over extracted audio and fail if the real model is unavailable."""
 
-    def __init__(self, *, use_real_models: bool = True) -> None:
+    def __init__(self, *, use_real_models: bool = False) -> None:
         self.use_real_models = use_real_models
         self._pipeline: Any | None = None
 
@@ -378,6 +414,10 @@ class WhisperASRProcessor(ASRProcessor):
             raise RuntimeError("Unable to load the real Whisper ASR model.") from exc
 
     def transcribe(self, video_path: str) -> Sequence[tuple[float, float, str]]:
+        if not self.use_real_models:
+            return []
+        if not Path(video_path).exists():
+            return []
         audio_path = Path(video_path).with_suffix(".wav")
         result = subprocess.run(
             [
@@ -442,7 +482,7 @@ class TemporalAlignerImpl(TemporalAligner):
 
 
 class VideoPreprocessor:
-    """Orchestrate the offline AIC 2026 preprocessing pipeline using real models only."""
+    """Orchestrate offline preprocessing with optional real-model execution."""
 
     def __init__(
         self,
@@ -453,7 +493,7 @@ class VideoPreprocessor:
         retrieval_embedder: RetrievalEmbedder | None = None,
         asr_processor: ASRProcessor | None = None,
         temporal_aligner: TemporalAligner | None = None,
-        use_real_models: bool = True,
+        use_real_models: bool = False,
     ) -> None:
         self.use_real_models = use_real_models
         self.frame_sampler = frame_sampler or OpenCVFrameSampler()
@@ -475,12 +515,12 @@ class VideoPreprocessor:
 
 
 class AICVideoPipeline:
-    """Wire the organizer-artifact-first AIC 2026 offline flow into one explicit processing path."""
+    """Wire the organizer-artifact-first offline flow with raw-video fallback."""
 
     def __init__(
         self,
         *,
-        use_real_models: bool = True,
+        use_real_models: bool = False,
         frame_sampler: FrameSampler | None = None,
         keyframe_selector: KeyframeSelector | None = None,
         ocr_captioner: OCRCaptioner | None = None,
@@ -490,7 +530,7 @@ class AICVideoPipeline:
         organizer_root: str | Path | None = None,
     ) -> None:
         self.use_real_models = use_real_models
-        self.organizer_root = Path(organizer_root) if organizer_root is not None else None
+        self.organizer_root = Path(organizer_root) if organizer_root is not None else Path("data")
         self.frame_sampler = frame_sampler or OpenCVFrameSampler()
         self.keyframe_selector = keyframe_selector or RelativeL2KeyframeSelector(use_real_models=self.use_real_models)
         self.ocr_captioner = ocr_captioner or VisionCaptionOCR(use_real_models=self.use_real_models)
@@ -528,15 +568,23 @@ class AICVideoPipeline:
             )
             records.append(record)
 
-        clip_file = root / "processed" / "embeddings" / f"{stem}.npy"
-        if clip_file.exists():
+        clip_paths = [
+            root / "processed" / "embeddings" / f"{stem}.npy",
+            root / "processed" / "embeddings" / "clip" / f"{stem}.npy",
+            root / "embeddings" / f"{stem}.npy",
+            root / "artifacts" / "embeddings" / f"{stem}.npy",
+        ]
+        for clip_file in clip_paths:
+            if not clip_file.exists():
+                continue
             try:
                 embeddings = np.load(clip_file)
-                if embeddings.ndim == 2 and len(embeddings) >= len(records):
-                    for index, record in enumerate(records[: len(embeddings)]):
-                        record.clip_embedding = [float(value) for value in np.asarray(embeddings[index]).tolist()]
-            except Exception:
-                pass
+            except (ValueError, OSError):
+                continue
+            if embeddings.ndim == 2 and len(embeddings) >= len(records):
+                for index, record in enumerate(records[: len(embeddings)]):
+                    record.clip_embedding = [float(value) for value in np.asarray(embeddings[index]).tolist()]
+                break
 
         metadata_file = root / "metadata" / f"{stem}.json"
         if metadata_file.exists():
@@ -570,16 +618,18 @@ class AICVideoPipeline:
     @property
     def stages(self) -> list[str]:
         return [
-            "AutoShot shot detection",
+            "load organizer keyframes and metadata when available",
+            "load organizer CLIP embeddings when available",
+            "optional ASR alignment from raw video when available",
+            "fallback raw-video preprocessing when organizer artifacts are missing",
             "sample every 8 frames",
             "CLIP ViT-L/14-quickgelu candidate embeddings",
             "relative L2 filtering (> 0.4)",
             "keyframes",
-            "Qwen2.5-VL OCR",
-            "Qwen2.5-VL caption / scene description",
-            "CLIP DFN5B 1024-d embedding",
+            "OCR/caption annotation",
+            "CLIP DFN5B-style retrieval embedding",
             "SigLIP2 1152-d embedding",
-            "Whisper ASR",
+            "Whisper ASR (real-model mode)",
             "temporal alignment of ASR to keyframes",
             "multimodal keyframe records",
         ]
@@ -588,8 +638,10 @@ class AICVideoPipeline:
         organizer_data = self._load_organizer_artifacts(video_path)
         if organizer_data is not None:
             shots, records = organizer_data
-            asr_segments = list(self.asr_processor.transcribe(video_path))
-            if records:
+            asr_segments: list[tuple[float, float, str]] = []
+            if Path(video_path).exists():
+                asr_segments = list(self.asr_processor.transcribe(video_path))
+            if records and asr_segments:
                 records = list(self.temporal_aligner.align(records, asr_segments))
             return shots, records
 

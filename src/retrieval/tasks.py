@@ -12,6 +12,7 @@ from src.retrieval.pipeline import VideoRetrievalPipeline
 from src.schemas.answers import RankedAnswer
 from src.schemas.evidence import EvidenceRecord
 from src.schemas.submission import QASubmissionRecord, TKISSubmissionRecord, TRAKESubmissionRecord
+from src.submission.serializer import write_submission_csv
 
 
 @dataclass(slots=True)
@@ -312,12 +313,25 @@ class PreliminaryTaskRunner:
             "rank": getattr(record, "rank", None),
             "video_id": getattr(record, "video_id", None),
         }
-        if hasattr(record, "frame_id"):
-            payload["frame_id"] = record.frame_id
-        if hasattr(record, "frames"):
-            payload["frames"] = record.frames
-        if hasattr(record, "answer"):
+        if isinstance(record, TKISSubmissionRecord):
+            payload["frame_id"] = int(record.frame_id)
+            if output_path is not None:
+                csv_path = write_submission_csv(task_type="tkis", records=[record], output_path=output_path)
+                payload["csv_path"] = str(csv_path)
+            return payload
+        if isinstance(record, QASubmissionRecord):
+            payload["frame_id"] = int(record.frame_id)
             payload["answer"] = record.answer
+            if output_path is not None:
+                csv_path = write_submission_csv(task_type="qa", records=[record], output_path=output_path)
+                payload["csv_path"] = str(csv_path)
+            return payload
+        if isinstance(record, TRAKESubmissionRecord):
+            payload["frames"] = list(record.frames)
+            if output_path is not None:
+                csv_path = write_submission_csv(task_type="trake", records=[record], output_path=output_path, expected_event_count=len(record.frames))
+                payload["csv_path"] = str(csv_path)
+            return payload
         if output_path is not None:
             with open(output_path, "w", encoding="utf-8") as handle:
                 json.dump(payload, handle, ensure_ascii=False, indent=2)
