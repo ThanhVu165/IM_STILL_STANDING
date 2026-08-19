@@ -16,18 +16,31 @@ def run_pipeline(
     *,
     index_to_stores: bool = False,
     output_dir: str | None = None,
+    processing_pipeline: AICVideoPipeline | None = None,
+    indexing_pipeline: VideoIndexingPipeline | None = None,
 ) -> dict[str, Any]:
     """Run the artifact-first video processing pipeline for a single input video."""
     path = Path(video_path)
     if not path.exists():
         raise FileNotFoundError(f"Video not found: {video_path}")
 
-    pipeline = AICVideoPipeline(use_real_models=True)
-    manifest = pipeline.run(str(path), output_dir=output_dir, write_json=output_dir is not None)
+    pipeline = processing_pipeline or AICVideoPipeline(use_real_models=True)
+    shots, records = pipeline.process(str(path))
+    manifest = pipeline.run(
+        str(path),
+        output_dir=output_dir,
+        write_json=output_dir is not None,
+        preprocessed=(shots, records),
+    )
 
     if index_to_stores:
-        index_pipeline = VideoIndexingPipeline(use_real_models=True)
-        indexed = index_pipeline.run(str(path), output_dir=output_dir, write_json=output_dir is not None)
+        index_pipeline = indexing_pipeline or VideoIndexingPipeline(use_real_models=True)
+        indexed = index_pipeline.run(
+            str(path),
+            output_dir=output_dir,
+            write_json=output_dir is not None,
+            preprocessed=(shots, records),
+        )
         manifest["indexed"] = indexed
         manifest["cache"] = indexed.get("cache")
 

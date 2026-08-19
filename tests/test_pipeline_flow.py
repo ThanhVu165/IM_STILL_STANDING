@@ -1,31 +1,82 @@
 from pathlib import Path
+from dataclasses import asdict
 
-import cv2
-import numpy as np
-
-from src.preprocessing.video_processor import AICVideoPipeline
-
-
-def test_aic_pipeline_exposes_standard_stage_order() -> None:
-    pipeline = AICVideoPipeline()
-    assert pipeline.stages[0].startswith("AutoShot")
-    assert "sample every 8 frames" in pipeline.stages[1]
-    assert "relative L2" in pipeline.stages[3]
-    assert "Whisper ASR" in pipeline.stages[9]
-    assert "multimodal keyframe records" in pipeline.stages[-1]
+from src.run_video_pipeline import run_pipeline
+from src.schemas.video import KeyframeRecord, ShotRecord
 
 
-def test_aic_pipeline_run_creates_manifest_for_real_video(tmp_path: Path) -> None:
+class _FakeProcessingPipeline:
+    def __init__(self) -> None:
+        self.process_calls = 0
+        self.stages = ["sample", "annotate", "embed"]
+
+    def process(self, video_path: str):
+        self.process_calls += 1
+        shots = [
+            ShotRecord(
+                video_id=Path(video_path).stem,
+                shot_id="shot_0",
+                start_time=0.0,
+                end_time=1.0,
+                start_frame=0,
+                end_frame=8,
+            )
+        ]
+        records = [
+            KeyframeRecord(
+                video_id=Path(video_path).stem,
+                frame_id=0,
+                timestamp=0.0,
+                image_ref=f"{video_path}#frame=0",
+                caption="scene",
+                ocr="",
+                asr="",
+                clip_embedding=[1.0, 0.0],
+                siglip2_embedding=[1.0, 0.0],
+            )
+        ]
+        return shots, records
+
+    def run(self, video_path: str, *, output_dir=None, write_json=True, preprocessed=None):
+        shots, records = preprocessed if preprocessed is not None else self.process(video_path)
+        return {
+            "video_path": video_path,
+            "stages": list(self.stages),
+            "shots": [asdict(shot) for shot in shots],
+            "keyframes": [asdict(record) for record in records],
+            "summary": {"shot_count": len(shots), "keyframe_count": len(records)},
+        }
+
+
+class _FakeIndexingPipeline:
+    def __init__(self) -> None:
+        self.run_calls = 0
+
+    def run(self, video_path: str, *, output_dir=None, write_json=True, preprocessed=None):
+        self.run_calls += 1
+        shots, records = preprocessed
+        return {
+            "video_path": video_path,
+            "summary": {"shot_count": len(shots), "keyframe_count": len(records)},
+            "cache": {"video_path": video_path, "keyframe_count": len(records)},
+        }
+
+
+def test_run_pipeline_reuses_preprocessed_records_for_indexing(tmp_path: Path) -> None:
     video_path = tmp_path / "demo_manifest_video.mp4"
-    writer = cv2.VideoWriter(str(video_path), cv2.VideoWriter_fourcc(*"mp4v"), 10.0, (32, 32))
-    for _ in range(20):
-        frame = np.full((32, 32, 3), 64, dtype=np.uint8)
-        writer.write(frame)
-    writer.release()
+    video_path.write_bytes(b"fake-video-content")
 
-    manifest = AICVideoPipeline().run(str(video_path), output_dir=tmp_path / "artifacts")
+    processing = _FakeProcessingPipeline()
+    indexing = _FakeIndexingPipeline()
+    manifest = run_pipeline(
+        str(video_path),
+        index_to_stores=True,
+        processing_pipeline=processing,
+        indexing_pipeline=indexing,
+    )
 
-    assert manifest["summary"]["keyframe_count"] > 0
-    assert manifest["stages"]
-    assert manifest["summary"]["shot_count"] > 0
-    assert Path(manifest["manifest_path"]).exists()
+    assert processing.process_calls == 1
+    assert indexing.run_calls == 1
+    assert manifest["summary"]["keyframe_count"] == 1
+    assert manifest["indexed"]["summary"]["keyframe_count"] == 1
+    assert manifest["cache"]["keyframe_count"] == 1

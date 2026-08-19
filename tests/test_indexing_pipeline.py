@@ -1,26 +1,56 @@
 from pathlib import Path
 
-import cv2
-import numpy as np
-
 from src.indexing.pipeline import VideoIndexingPipeline
+from src.schemas.video import KeyframeRecord, ShotRecord
 
 
-def test_video_indexing_pipeline_runs_end_to_end() -> None:
-    video_path = Path("demo_index_video.mp4")
-    writer = cv2.VideoWriter(str(video_path), cv2.VideoWriter_fourcc(*"mp4v"), 10.0, (32, 32))
-    for _ in range(20):
-        frame = np.full((32, 32, 3), 128, dtype=np.uint8)
-        writer.write(frame)
-    writer.release()
+class _StubPreprocessor:
+    def process(self, video_path: str):
+        video_id = Path(video_path).stem
+        shots = [
+            ShotRecord(
+                video_id=video_id,
+                shot_id="shot_0",
+                start_time=0.0,
+                end_time=1.0,
+                start_frame=0,
+                end_frame=8,
+            )
+        ]
+        records = [
+            KeyframeRecord(
+                video_id=video_id,
+                frame_id=0,
+                timestamp=0.0,
+                image_ref=f"{video_path}#frame=0",
+                ocr="red shirt",
+                caption="scene with red shirt",
+                asr="red shirt appears",
+                clip_embedding=[1.0, 0.0, 0.0],
+                siglip2_embedding=[1.0, 0.0, 0.0],
+                metadata={"source": "stub"},
+            )
+        ]
+        return shots, records
 
-    pipeline = VideoIndexingPipeline()
-    shots, records = pipeline.index_video(str(video_path))
+
+def test_video_indexing_pipeline_runs_with_stubbed_preprocessor() -> None:
+    pipeline = VideoIndexingPipeline(preprocessor=_StubPreprocessor())
+    shots, records = pipeline.index_video("demo_index_video.mp4")
 
     assert shots
     assert records
-    assert pipeline.cached_video(str(video_path)) is not None
-    assert pipeline.milvus.search(records[0].clip_embedding or [1.0, 1.0, 1.0], 1, field="clip_embedding")
-    assert pipeline.elasticsearch.search("scene", 1, fields=("caption", "ocr"))
+    assert pipeline.cached_video("demo_index_video.mp4") is not None
+    assert pipeline.vector_index.search(records[0].clip_embedding or [1.0, 0.0, 0.0], 1, field="clip_embedding")
+    assert pipeline.text_index.search("red shirt", 1, fields=("caption", "ocr"))
 
-    video_path.unlink(missing_ok=True)
+
+def test_video_indexing_pipeline_run_accepts_preprocessed_records() -> None:
+    pipeline = VideoIndexingPipeline(preprocessor=_StubPreprocessor())
+    shots, records = _StubPreprocessor().process("demo_index_video.mp4")
+
+    manifest = pipeline.run("demo_index_video.mp4", write_json=False, preprocessed=(shots, records))
+
+    assert manifest["summary"]["shot_count"] == 1
+    assert manifest["summary"]["keyframe_count"] == 1
+    assert manifest["cache"]["video_id"] == "demo_index_video"

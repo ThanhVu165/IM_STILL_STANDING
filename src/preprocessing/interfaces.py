@@ -18,6 +18,7 @@ class FrameSample:
     frame_index: int
     timestamp: float
     image_ref: str
+    video_id: str = ""
 
 
 class ShotDetector(Protocol):
