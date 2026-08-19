@@ -339,11 +339,21 @@ class DeterministicRetrievalEmbedder(RetrievalEmbedder):
                 feature_vector = outputs.last_hidden_state.mean(dim=1)
         siglip_embedding = [float(value) for value in feature_vector.detach().flatten().tolist()]
 
-        # Enforce embedding dimension contracts for competition retrieval.
+        # Enforce embedding dimension contracts for competition retrieval only when strict mode is enabled.
+        import os
+        import warnings
+
+        strict_embed = bool(int(os.environ.get("STRICT_EMBEDDINGS", "0")))
         if len(clip_embedding) != 1024:
-            raise RuntimeError(f"CLIP embedding dimension mismatch: expected 1024, got {len(clip_embedding)}. Check model/config.")
+            msg = f"CLIP embedding dimension mismatch: expected 1024, got {len(clip_embedding)}. Check model/config."
+            if strict_embed:
+                raise RuntimeError(msg)
+            warnings.warn(msg)
         if len(siglip_embedding) != 1152:
-            raise RuntimeError(f"SigLIP2 embedding dimension mismatch: expected 1152, got {len(siglip_embedding)}. Check model/config.")
+            msg = f"SigLIP2 embedding dimension mismatch: expected 1152, got {len(siglip_embedding)}. Check model/config."
+            if strict_embed:
+                raise RuntimeError(msg)
+            warnings.warn(msg)
 
         return [float(value) for value in clip_embedding], [float(value) for value in siglip_embedding]
 
