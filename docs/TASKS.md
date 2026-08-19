@@ -16,6 +16,8 @@ query
  -> final frame
 ```
 
+When organizer-provided keyframes and CLIP embeddings already exist, the default path is to load them directly rather than re-run shot detection or heavy preprocessing.
+
 ### Internal answer
 
 ```yaml

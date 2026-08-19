@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import csv
 import json
 import math
 import re
@@ -12,9 +13,9 @@ from typing import Any, Sequence
 
 import numpy as np
 
-from src.indexing.elasticsearch_adapter import ElasticsearchAdapter
-from src.indexing.milvus_adapter import MilvusAdapter
+from src.indexing.faiss_adapter import FaissVectorAdapter
 from src.indexing.redis_cache import RedisResultCache
+from src.indexing.sqlite_adapter import SQLiteTextAdapter
 from src.retrieval.fusion import reciprocal_rank_fusion
 from src.retrieval.temporal import apply_temporal_rerank
 from src.schemas.retrieval import RetrievalResult, TemporalCandidate
@@ -23,6 +24,20 @@ from src.schemas.video import KeyframeRecord
 
 def _tokenize(text: str) -> list[str]:
     return [token.lower() for token in re.findall(r"[\w\-]+", text or "") if token.strip()]
+
+
+def _as_float(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return float(default)
+
+
+def _as_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return int(default)
 
 
 class VideoRetrievalPipeline:
@@ -47,8 +62,11 @@ class VideoRetrievalPipeline:
         cache_prefix: str = "video_query:",
     ) -> None:
         self.data_root = Path(data_root) if data_root is not None else Path("data")
-        self.milvus = MilvusAdapter(milvus_client if milvus_client is not None else {}, collection_name)
-        self.elasticsearch = ElasticsearchAdapter(
+        self.milvus = FaissVectorAdapter(
+            milvus_client if milvus_client is not None else {},
+            collection_name,
+        )
+        self.elasticsearch = SQLiteTextAdapter(
             elasticsearch_client if elasticsearch_client is not None else {},
             index_name,
         )
@@ -71,51 +89,110 @@ class VideoRetrievalPipeline:
 
     def _load_records_from_disk(self) -> None:
         root = self.data_root
-        keyframe_root = root / "processed" / "keyframes"
-        if not keyframe_root.exists():
-            return
-
         records: list[KeyframeRecord] = []
-        for video_dir in sorted(keyframe_root.iterdir()):
-            if not video_dir.is_dir():
-                continue
-            video_id = video_dir.name
-            for frame_file in sorted(video_dir.iterdir()):
-                if not frame_file.is_file() or frame_file.suffix.lower() not in {".jpg", ".jpeg", ".png", ".bmp"}:
-                    continue
-                frame_id = int(frame_file.stem) if frame_file.stem.isdigit() else 0
-                record = KeyframeRecord(
-                    video_id=video_id,
-                    frame_id=frame_id,
-                    timestamp=float(frame_id) / 30.0,
-                    image_ref=str(frame_file),
-                    metadata={"source": "organizer-keyframes"},
-                )
-                records.append(record)
+
+        catalog_paths = [
+            root / "frames.csv",
+            root / "artifacts" / "frames.csv",
+            root / "data" / "frames.csv",
+            root / "processed" / "frames.csv",
+            root / "query" / "frames.csv",
+        ]
+        for catalog_path in catalog_paths:
+            if catalog_path.exists():
+                rows = []
+                with catalog_path.open("r", encoding="utf-8", newline="") as handle:
+                    reader = csv.DictReader(handle)
+                    for row in reader:
+                        rows.append(row)
+                if rows:
+                    for row in rows:
+                        video_id = str(row.get("video_id") or row.get("video") or row.get("video_name") or row.get("id") or root.name)
+                        frame_id = _as_int(row.get("frame_id") or row.get("frame") or row.get("keyframe_id") or row.get("idx") or 0)
+                        timestamp = _as_float(row.get("timestamp") or row.get("time") or row.get("second") or 0.0)
+                        image_ref_raw = row.get("image_ref") or row.get("image_path") or row.get("path") or row.get("frame_path") or row.get("keyframe_path")
+                        if image_ref_raw is None:
+                            frame_name = row.get("filename") or row.get("name") or f"{frame_id}.jpg"
+                            image_ref_raw = str(root / "keyframes" / video_id / frame_name)
+                        image_ref = str(image_ref_raw)
+                        if not Path(image_ref).is_absolute():
+                            image_ref = str((catalog_path.parent / image_ref).resolve()) if not image_ref.startswith(".") and not image_ref.startswith("/") else str(Path(image_ref))
+                        record = KeyframeRecord(
+                            video_id=video_id,
+                            frame_id=frame_id,
+                            timestamp=timestamp,
+                            image_ref=image_ref,
+                            metadata={"source": "frames.csv"},
+                        )
+                        if row.get("caption"):
+                            record.caption = str(row.get("caption"))
+                        if row.get("ocr"):
+                            record.ocr = str(row.get("ocr"))
+                        if row.get("asr"):
+                            record.asr = str(row.get("asr"))
+                        if row.get("objects"):
+                            try:
+                                record.objects = json.loads(row.get("objects")) if isinstance(row.get("objects"), str) else row.get("objects")
+                            except Exception:
+                                record.objects = None
+                        records.append(record)
+                    break
+
+        if not records:
+            keyframe_root = root / "processed" / "keyframes"
+            if not keyframe_root.exists():
+                keyframe_root = root / "keyframes"
+            if keyframe_root.exists():
+                for video_dir in sorted(keyframe_root.iterdir()):
+                    if not video_dir.is_dir():
+                        continue
+                    video_id = video_dir.name
+                    for frame_file in sorted(video_dir.iterdir()):
+                        if not frame_file.is_file() or frame_file.suffix.lower() not in {".jpg", ".jpeg", ".png", ".bmp"}:
+                            continue
+                        frame_id = int(frame_file.stem) if frame_file.stem.isdigit() else 0
+                        records.append(
+                            KeyframeRecord(
+                                video_id=video_id,
+                                frame_id=frame_id,
+                                timestamp=float(frame_id) / 30.0,
+                                image_ref=str(frame_file),
+                                metadata={"source": "organizer-keyframes"},
+                            )
+                        )
 
         if not records:
             return
 
-        embeddings_file = root / "processed" / "embeddings"
-        if embeddings_file.exists():
-            for candidate in sorted(embeddings_file.glob("*.npy")):
+        embeddings_roots = [
+            root / "processed" / "embeddings",
+            root / "artifacts" / "embeddings",
+            root / "embeddings",
+            root / "data" / "embeddings",
+        ]
+        for embeddings_root in embeddings_roots:
+            if not embeddings_root.exists():
+                continue
+            for candidate in sorted(embeddings_root.glob("*.npy")):
                 try:
                     array = np.load(candidate)
+                    embeddings = [np.asarray(row, dtype=float).tolist() for row in array] if array.ndim == 2 else []
                     if array.ndim == 1:
                         vector = [float(value) for value in np.asarray(array).tolist()]
                         for record in records:
                             if record.video_id == candidate.stem:
                                 record.clip_embedding = vector
                                 record.siglip2_embedding = vector[: min(len(vector), 4)]
-                    elif array.ndim == 2:
-                        vectors = [np.asarray(row, dtype=float).tolist() for row in array]
+                    elif embeddings:
                         for index, record in enumerate(records):
-                            if record.video_id == candidate.stem and index < len(vectors):
-                                record.clip_embedding = [float(value) for value in vectors[index]]
+                            if record.video_id == candidate.stem and index < len(embeddings):
+                                record.clip_embedding = [float(value) for value in embeddings[index]]
                 except Exception:
                     continue
 
         metadata_dir = root / "metadata"
+        if not metadata_dir.exists():
+            metadata_dir = root / "artifacts" / "metadata"
         if metadata_dir.exists():
             for metadata_file in sorted(metadata_dir.glob("*.json")):
                 try:
@@ -126,9 +203,13 @@ class VideoRetrievalPipeline:
                     continue
                 for record in records:
                     if record.video_id == metadata_file.stem:
+                        if record.metadata is None:
+                            record.metadata = {}
                         record.metadata.update(payload)
 
         objects_root = root / "processed" / "objects"
+        if not objects_root.exists():
+            objects_root = root / "objects"
         if objects_root.exists():
             for video_dir in sorted(objects_root.iterdir()):
                 if not video_dir.is_dir():
@@ -337,6 +418,30 @@ class VideoRetrievalPipeline:
             return final_results[: max(0, top_k)]
 
         return fused_results[: max(0, top_k)]
+
+    def query_frames(self, query: str, *, top_k: int = 10, previous_query: str | None = None, next_query: str | None = None) -> list[dict[str, Any]]:
+        results = self.query(query, top_k=top_k, previous_query=previous_query, next_query=next_query)
+        payload: list[dict[str, Any]] = []
+        for result in results:
+            payload.append(
+                {
+                    "video_id": result.video_id,
+                    "frame_id": result.frame_id,
+                    "timestamp": result.timestamp,
+                    "path": next(
+                        (
+                            item.image_ref
+                            for item in self._records
+                            if str(item.video_id) == str(result.video_id) and int(item.frame_id) == int(result.frame_id)
+                        ),
+                        "",
+                    ),
+                    "score": result.score,
+                    "source": result.source,
+                    "rank": result.rank,
+                }
+            )
+        return payload
 
     def build_cache_key(self, query: str) -> str:
         normalized = re.sub(r"\s+", " ", query.strip().lower())

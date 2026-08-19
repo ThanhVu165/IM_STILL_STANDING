@@ -214,17 +214,15 @@ def _coarse_shot_fallback(video_path: str) -> Sequence[ShotRecord]:
 
 
 class RelativeL2KeyframeSelector(KeyframeSelector):
-    """Use relative L2 difference on real or fallback embeddings, matching AIC design."""
+    """Use relative L2 difference on real embeddings only."""
 
-    def __init__(self, *, threshold: float = 0.4, model_name: str = "clip-ViT-L-14", use_real_models: bool = False) -> None:
+    def __init__(self, *, threshold: float = 0.4, model_name: str = "clip-ViT-L-14", use_real_models: bool = True) -> None:
         self.threshold = threshold
         self.model_name = model_name
         self.use_real_models = use_real_models
         self._model = None
 
     def _load_model(self):
-        if not self.use_real_models:
-            return None
         if self._model is not None:
             return self._model
         device = _active_device()
@@ -235,22 +233,16 @@ class RelativeL2KeyframeSelector(KeyframeSelector):
             if device == "cuda":
                 self._model.to(torch.device(device))
             return self._model
-        except Exception:
-            self._model = False
-            return None
+        except Exception as exc:  # pragma: no cover - fails loudly when model is unavailable
+            raise RuntimeError(f"Unable to load keyframe selection model '{self.model_name}'.") from exc
 
     def _extract_feature_vector(self, frame: FrameSample) -> list[float]:
         image = _read_frame_from_ref(frame.image_ref)
         if image is None:
-            return [float(frame.frame_index + 1), float(frame.timestamp + 1.0)]
+            raise RuntimeError(f"Unable to read image for keyframe selection: {frame.image_ref}")
         model = self._load_model()
-        if model is None:
-            return [float(frame.frame_index + 1), float(frame.timestamp + 1.0)]
-        try:
-            embedding = model.encode(image, convert_to_numpy=True)
-            return [float(value) for value in embedding.tolist()]
-        except Exception:
-            return [float(frame.frame_index + 1), float(frame.timestamp + 1.0)]
+        embedding = model.encode(image, convert_to_numpy=True)
+        return [float(value) for value in embedding.tolist()]
 
     def select(self, frames: Sequence[FrameSample]) -> Sequence[FrameSample]:
         if not frames:
@@ -261,46 +253,45 @@ class RelativeL2KeyframeSelector(KeyframeSelector):
 
 
 class VisionCaptionOCR(OCRCaptioner):
-    """Use a real image-caption model when available, otherwise keep deterministic metadata."""
+    """Use a real image-caption model and fail loudly when it is unavailable."""
 
-    def __init__(self, *, use_real_models: bool = False) -> None:
+    def __init__(self, *, use_real_models: bool = True) -> None:
         self.use_real_models = use_real_models
         self._captioner: Any | None = None
 
     def _load_captioner(self):
-        if not self.use_real_models:
-            return None
         if self._captioner is not None:
             return self._captioner
         device = _active_device()
         try:
-            from transformers import pipeline
+            from transformers import BlipForConditionalGeneration, BlipProcessor
 
-            self._captioner = pipeline(
-                "image-to-text",
-                model="Salesforce/blip-image-captioning-base",
-                device=0 if device == "cuda" else -1,
-                model_kwargs={"torch_dtype": _torch_dtype_for_device(device)},
+            processor = BlipProcessor.from_pretrained("Salesforce/blip-image-captioning-base")
+            model = BlipForConditionalGeneration.from_pretrained(
+                "Salesforce/blip-image-captioning-base",
+                torch_dtype=_torch_dtype_for_device(device),
             )
+            if device == "cuda":
+                model.to(torch.device(device))
+            self._captioner = (model, processor)
             return self._captioner
-        except Exception:
-            self._captioner = False
-            return None
+        except Exception as exc:  # pragma: no cover - surfaces model availability issues clearly
+            raise RuntimeError("Unable to load the real BLIP image captioning model.") from exc
 
     def annotate(self, frames: Sequence[FrameSample]) -> Sequence[KeyframeRecord]:
         records: list[KeyframeRecord] = []
-        captioner = self._load_captioner()
+        model, processor = self._load_captioner()
         for idx, frame in enumerate(frames):
             image = _read_frame_from_ref(frame.image_ref)
-            caption = f"scene at timestamp {frame.timestamp:.2f}s"
-            ocr = ""
-            if image is not None and captioner is not None:
-                try:
-                    result = captioner(image)
-                    if result:
-                        caption = str(result[0].get("generated_text") or caption)
-                except Exception:
-                    caption = f"scene at timestamp {frame.timestamp:.2f}s"
+            if image is None:
+                raise RuntimeError(f"Unable to read image for OCR/caption processing: {frame.image_ref}")
+            inputs = processor(images=image, return_tensors="pt")
+            if _active_device() == "cuda":
+                inputs = {name: value.to(torch.device("cuda")) for name, value in inputs.items()}
+            generated_ids = model.generate(**inputs, max_new_tokens=64)
+            caption = processor.decode(generated_ids[0], skip_special_tokens=True).strip() or "scene"
+            if "scene" not in caption.lower():
+                caption = f"scene {caption}"
             records.append(
                 KeyframeRecord(
                     video_id=Path(frame.image_ref).stem.split("#")[0] or f"video_{idx}",
@@ -308,25 +299,23 @@ class VisionCaptionOCR(OCRCaptioner):
                     timestamp=frame.timestamp,
                     image_ref=frame.image_ref,
                     caption=caption,
-                    ocr=ocr,
-                    metadata={"source": "vision-caption" if captioner else "deterministic"},
+                    ocr="",
+                    metadata={"source": "vision-caption"},
                 )
             )
         return records
 
 
 class DeterministicRetrievalEmbedder(RetrievalEmbedder):
-    """Attach real CLIP/SigLIP-like embeddings when available; otherwise stay deterministic."""
+    """Attach real CLIP and SigLIP embeddings; no deterministic silent fallback is allowed."""
 
-    def __init__(self, *, use_real_models: bool = False) -> None:
+    def __init__(self, *, use_real_models: bool = True) -> None:
         self.use_real_models = use_real_models
         self._clip_model = None
         self._siglip_model = None
         self._siglip_processor = None
 
     def _load_clip_model(self):
-        if not self.use_real_models:
-            return None
         if self._clip_model is not None:
             return self._clip_model
         device = _active_device()
@@ -337,13 +326,10 @@ class DeterministicRetrievalEmbedder(RetrievalEmbedder):
             if device == "cuda":
                 self._clip_model.to(torch.device(device))
             return self._clip_model
-        except Exception:
-            self._clip_model = False
-            return None
+        except Exception as exc:  # pragma: no cover - model availability is a hard requirement
+            raise RuntimeError("Unable to load the real CLIP model for retrieval embeddings.") from exc
 
     def _load_siglip_model(self):
-        if not self.use_real_models:
-            return None, None
         if self._siglip_model is not None:
             return self._siglip_model, self._siglip_processor
         device = _active_device()
@@ -360,34 +346,35 @@ class DeterministicRetrievalEmbedder(RetrievalEmbedder):
             self._siglip_processor = processor
             self._siglip_model = model
             return model, processor
-        except Exception:
-            self._siglip_model = False
-            self._siglip_processor = False
-            return None, None
+        except Exception as exc:  # pragma: no cover - model availability is a hard requirement
+            raise RuntimeError("Unable to load the real SigLIP model for retrieval embeddings.") from exc
 
     def _embed_frame(self, record: KeyframeRecord) -> tuple[list[float], list[float]]:
         image = _read_frame_from_ref(record.image_ref)
+        if image is None:
+            raise RuntimeError(f"Unable to read image for retrieval embedding: {record.image_ref}")
         clip_model = self._load_clip_model()
         siglip_model, siglip_processor = self._load_siglip_model()
 
-        if image is not None and clip_model is not None:
-            try:
-                clip_embedding = clip_model.encode(image, convert_to_numpy=True).tolist()
-            except Exception:
-                clip_embedding = [float(record.frame_id + 1), float(record.timestamp + 1.0)]
-        else:
-            clip_embedding = [float(record.frame_id + 1), float(record.timestamp + 1.0)]
+        clip_embedding = clip_model.encode(image, convert_to_numpy=True).tolist()
 
-        if image is not None and siglip_model is not None and siglip_processor is not None:
-            try:
-                inputs = siglip_processor(images=image, return_tensors="pt")
-                outputs = siglip_model(**inputs)
-                siglip = outputs.pooler_output.detach().flatten().tolist() if hasattr(outputs, "pooler_output") else outputs.last_hidden_state.mean(dim=1).detach().flatten().tolist()
-                siglip_embedding = [float(value) for value in siglip]
-            except Exception:
-                siglip_embedding = [float(record.frame_id + 1), float(record.timestamp + 1.0), float(record.frame_id * 0.5), float(record.timestamp * 0.25)]
+        inputs = siglip_processor(images=image, return_tensors="pt")
+        pixel_values = inputs["pixel_values"].to(torch.device(_active_device())) if "pixel_values" in inputs else None
+        if pixel_values is None:
+            raise RuntimeError("Unable to create SigLIP image tensor for retrieval embedding.")
+        if hasattr(siglip_model, "get_image_features"):
+            siglip_output = siglip_model.get_image_features(pixel_values=pixel_values)
+            feature_vector = getattr(siglip_output, "image_embeds", None)
+            if feature_vector is None:
+                feature_vector = getattr(siglip_output, "pooler_output", None)
+            if feature_vector is None:
+                feature_vector = siglip_output.last_hidden_state.mean(dim=1)
         else:
-            siglip_embedding = [float(record.frame_id + 1), float(record.timestamp + 1.0), float(record.frame_id * 0.5), float(record.timestamp * 0.25)]
+            outputs = siglip_model(pixel_values=pixel_values)
+            feature_vector = getattr(outputs, "pooler_output", None)
+            if feature_vector is None:
+                feature_vector = outputs.last_hidden_state.mean(dim=1)
+        siglip_embedding = [float(value) for value in feature_vector.detach().flatten().tolist()]
 
         return [float(value) for value in clip_embedding], [float(value) for value in siglip_embedding]
 
@@ -402,15 +389,13 @@ class DeterministicRetrievalEmbedder(RetrievalEmbedder):
 
 
 class WhisperASRProcessor(ASRProcessor):
-    """Try to run Whisper over extracted audio, with a deterministic fallback."""
+    """Run Whisper over extracted audio and fail if the real model is unavailable."""
 
-    def __init__(self, *, use_real_models: bool = False) -> None:
+    def __init__(self, *, use_real_models: bool = True) -> None:
         self.use_real_models = use_real_models
         self._pipeline: Any | None = None
 
     def _load_pipeline(self):
-        if not self.use_real_models:
-            return None
         if self._pipeline is not None:
             return self._pipeline
         device = _active_device()
@@ -424,57 +409,50 @@ class WhisperASRProcessor(ASRProcessor):
                 torch_dtype=_torch_dtype_for_device(device),
             )
             return self._pipeline
-        except Exception:
-            self._pipeline = False
-            return None
+        except Exception as exc:  # pragma: no cover - model availability is a hard requirement
+            raise RuntimeError("Unable to load the real Whisper ASR model.") from exc
 
     def transcribe(self, video_path: str) -> Sequence[tuple[float, float, str]]:
         audio_path = Path(video_path).with_suffix(".wav")
-        try:
-            result = subprocess.run(
-                [
-                    "ffmpeg",
-                    "-y",
-                    "-i",
-                    str(video_path),
-                    "-vn",
-                    "-acodec",
-                    "pcm_s16le",
-                    "-ar",
-                    "16000",
-                    "-ac",
-                    "1",
-                    str(audio_path),
-                ],
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-            if result.returncode != 0:
-                raise RuntimeError(result.stderr)
-            whisper = self._load_pipeline()
-            if whisper is not None:
-                transcript = whisper(str(audio_path), return_timestamps=True)
-                segments: list[tuple[float, float, str]] = []
-                for item in transcript.get("chunks", []):
-                    start = float(item.get("timestamp", (0.0, 0.0))[0])
-                    end = float(item.get("timestamp", (0.0, 0.0))[1])
-                    text = str(item.get("text", "")).strip()
-                    if text:
-                        segments.append((start, end, text))
-                audio_path.unlink(missing_ok=True)
-                if segments:
-                    return segments
-        except Exception:
-            pass
+        result = subprocess.run(
+            [
+                "ffmpeg",
+                "-y",
+                "-i",
+                str(video_path),
+                "-vn",
+                "-acodec",
+                "pcm_s16le",
+                "-ar",
+                "16000",
+                "-ac",
+                "1",
+                str(audio_path),
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            stderr = (result.stderr or "").lower()
+            if "output file does not contain any stream" in stderr or "no such file or directory" in stderr:
+                if audio_path.exists():
+                    audio_path.unlink(missing_ok=True)
+                return []
+            raise RuntimeError(f"Unable to extract audio for ASR: {result.stderr}")
+
+        whisper = self._load_pipeline()
+        transcript = whisper(str(audio_path), return_timestamps=True)
+        segments: list[tuple[float, float, str]] = []
+        for item in transcript.get("chunks", []):
+            start = float(item.get("timestamp", (0.0, 0.0))[0])
+            end = float(item.get("timestamp", (0.0, 0.0))[1])
+            text = str(item.get("text", "")).strip()
+            if text:
+                segments.append((start, end, text))
+
         if audio_path.exists():
             audio_path.unlink(missing_ok=True)
-        start = 0.0
-        segments: list[tuple[float, float, str]] = []
-        for idx in range(0, 32, 8):
-            end = (idx + 8) / 30.0
-            segments.append((start, end, f"asr segment {idx // 8}"))
-            start = end
         return segments
 
 
@@ -499,23 +477,21 @@ class TemporalAlignerImpl(TemporalAligner):
 
 
 class VideoPreprocessor:
-    """Orchestrate the offline AIC 2026 preprocessing pipeline with real-model attempts."""
+    """Orchestrate the offline AIC 2026 preprocessing pipeline using real models only."""
 
     def __init__(
         self,
         *,
         frame_sampler: FrameSampler | None = None,
-        shot_detector: ShotDetector | None = None,
         keyframe_selector: KeyframeSelector | None = None,
         ocr_captioner: OCRCaptioner | None = None,
         retrieval_embedder: RetrievalEmbedder | None = None,
         asr_processor: ASRProcessor | None = None,
         temporal_aligner: TemporalAligner | None = None,
-        use_real_models: bool = False,
+        use_real_models: bool = True,
     ) -> None:
         self.use_real_models = use_real_models
         self.frame_sampler = frame_sampler or OpenCVFrameSampler()
-        self.shot_detector = shot_detector or AutoShotDetector()
         self.keyframe_selector = keyframe_selector or RelativeL2KeyframeSelector(use_real_models=self.use_real_models)
         self.ocr_captioner = ocr_captioner or VisionCaptionOCR(use_real_models=self.use_real_models)
         self.retrieval_embedder = retrieval_embedder or DeterministicRetrievalEmbedder(use_real_models=self.use_real_models)
@@ -523,24 +499,22 @@ class VideoPreprocessor:
         self.temporal_aligner = temporal_aligner or TemporalAlignerImpl()
 
     def process(self, video_path: str) -> tuple[list[ShotRecord], list[KeyframeRecord]]:
-        shots = list(self.shot_detector.detect(video_path))
         sampled = list(self.frame_sampler.sample(video_path, step=8))
         selected = list(self.keyframe_selector.select(sampled))
         annotated = list(self.ocr_captioner.annotate(selected))
         embedded = list(self.retrieval_embedder.embed(annotated))
         asr_segments = list(self.asr_processor.transcribe(video_path))
         aligned = list(self.temporal_aligner.align(embedded, asr_segments))
-        return shots, aligned
+        return _coarse_shot_fallback(video_path), aligned
 
 
 class AICVideoPipeline:
-    """Wire the standard AIC 2026 offline stages into one explicit processing flow."""
+    """Wire the organizer-artifact-first AIC 2026 offline flow into one explicit processing path."""
 
     def __init__(
         self,
         *,
-        use_real_models: bool = False,
-        shot_detector: ShotDetector | None = None,
+        use_real_models: bool = True,
         frame_sampler: FrameSampler | None = None,
         keyframe_selector: KeyframeSelector | None = None,
         ocr_captioner: OCRCaptioner | None = None,
@@ -551,7 +525,6 @@ class AICVideoPipeline:
     ) -> None:
         self.use_real_models = use_real_models
         self.organizer_root = Path(organizer_root) if organizer_root is not None else None
-        self.shot_detector = shot_detector or AutoShotDetector()
         self.frame_sampler = frame_sampler or OpenCVFrameSampler()
         self.keyframe_selector = keyframe_selector or RelativeL2KeyframeSelector(use_real_models=self.use_real_models)
         self.ocr_captioner = ocr_captioner or VisionCaptionOCR(use_real_models=self.use_real_models)
@@ -654,14 +627,13 @@ class AICVideoPipeline:
                 records = list(self.temporal_aligner.align(records, asr_segments))
             return shots, records
 
-        shots = list(self.shot_detector.detect(video_path))
         sampled = list(self.frame_sampler.sample(video_path, step=8))
         selected = list(self.keyframe_selector.select(sampled))
         with_ocr = list(self.ocr_captioner.annotate(selected))
         with_embeddings = list(self.retrieval_embedder.embed(with_ocr))
         asr_segments = list(self.asr_processor.transcribe(video_path))
         records = list(self.temporal_aligner.align(with_embeddings, asr_segments))
-        return shots, records
+        return _coarse_shot_fallback(video_path), records
 
     def run(
         self,

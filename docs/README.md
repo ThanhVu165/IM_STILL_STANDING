@@ -42,7 +42,7 @@ RAW VIDEO
   -> Whisper timestamped ASR
   -> temporal alignment of ASR to keyframes
   -> multimodal keyframe records
-  -> Milvus + Elasticsearch + Redis
+  -> FAISS + SQLite/FTS + Redis
 ```
 
 Important: the CLIP used for keyframe selection is distinct from the CLIP used for retrieval.
@@ -72,17 +72,39 @@ Each keyframe should carry at least:
 
 ## 4. Indexing
 
-### Milvus
+### FAISS (default local backend)
 
-Use Milvus for high-dimensional vector retrieval. Store/search the CLIP and SigLIP2 embeddings.
+For the current local and competition environment, FAISS is the default vector index. It is lightweight, fast enough for CPU execution, and matches the organizer-provided artifact pattern well: index a CLIP embedding table once, then query top-k candidates with minimal deployment overhead.
 
-### Elasticsearch
+Use FAISS when:
 
-Use Elasticsearch for OCR, captions, ASR, and metadata search/filtering. This is especially important for distinctive text/entity queries where lexical filtering can outperform semantic search.
+- the corpus is already built from organizer-provided keyframes and `.npy` embeddings
+- the system must run on a local workstation without dedicated database services
+- we want a simpler, deterministic, artifact-first pipeline
+
+### SQLite / FTS (default lexical backend)
+
+Use SQLite (or SQLite FTS) for OCR, captions, ASR, metadata, and object text search. This is sufficient for local search over processed keyframe metadata and is a good replacement for Elasticsearch in the preliminary pipeline.
+
+### Optional production backends
+
+Milvus and Elasticsearch remain valid optional backends, but they are not required for the local project baseline. They are useful only when data scale or operational requirements justify the added complexity.
 
 ### Redis
 
 Use Redis as a cache for repeated or expensive retrieval results.
+
+## GPU vs CPU for FAISS
+
+For this project, CPU is the correct default choice unless the local machine has a modern NVIDIA GPU and the indexing/query workload becomes noticeably bottlenecked.
+
+Recommended policy:
+
+- use `faiss-cpu` by default for local development and the challenge setup
+- use GPU only when the corpus is large and vector search latency or batch indexing becomes the main bottleneck
+- keep the software architecture backend-agnostic so switching to GPU-backed FAISS later is a configuration change, not a redesign
+
+In practice, for organizer-provided keyframes and CLIP features, a CPU FAISS index is usually enough to satisfy the required retrieval speed and keeps the system lightweight enough for everyday team usage.
 
 ## 5. Online query pipeline
 

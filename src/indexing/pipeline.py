@@ -7,9 +7,9 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
-from src.indexing.elasticsearch_adapter import ElasticsearchAdapter
-from src.indexing.milvus_adapter import MilvusAdapter
+from src.indexing.faiss_adapter import FaissVectorAdapter
 from src.indexing.redis_cache import RedisResultCache
+from src.indexing.sqlite_adapter import SQLiteTextAdapter
 from src.preprocessing.video_processor import AICVideoPipeline
 from src.schemas.video import KeyframeRecord, ShotRecord
 
@@ -27,11 +27,11 @@ class VideoIndexingPipeline:
         collection_name: str = "video_keyframes",
         index_name: str = "video_keyframes",
         cache_prefix: str = "video_index:",
-        use_real_models: bool = False,
+        use_real_models: bool = True,
     ) -> None:
         self.preprocessor = preprocessor or AICVideoPipeline(use_real_models=use_real_models)
-        self.milvus = MilvusAdapter(milvus_client if milvus_client is not None else {}, collection_name)
-        self.elasticsearch = ElasticsearchAdapter(
+        self.milvus = FaissVectorAdapter(milvus_client if milvus_client is not None else {}, collection_name)
+        self.elasticsearch = SQLiteTextAdapter(
             elasticsearch_client if elasticsearch_client is not None else {},
             index_name,
         )
