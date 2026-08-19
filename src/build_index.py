@@ -6,7 +6,7 @@ import argparse
 import json
 from pathlib import Path
 
-from src.retrieval.pipeline import VideoRetrievalPipeline
+from src.indexing.build_service import build_artifact_index
 
 
 def main() -> None:
@@ -29,12 +29,7 @@ def main() -> None:
         }, ensure_ascii=False, indent=2))
         return
 
-    pipeline = VideoRetrievalPipeline(
-        data_root=data_root,
-        load_index_only=False,
-        initialize_from_disk=False,
-    )
-    records = pipeline.build_index()
+    records = build_artifact_index(data_root=data_root)
     print(json.dumps({
         "status": "built",
         "indexed_records": len(records),
