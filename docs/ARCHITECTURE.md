@@ -4,36 +4,27 @@
 
 ```text
 [Data]
-  Raw videos + organizer keyframes + objects + CLIP features + metadata
+  Organizer-provided keyframes + CLIP .npy + metadata + objects + optional raw videos
           |
           v
-[Preprocessing]
-  AutoShot -> every-8th-frame sampling -> CLIP/L2 keyframe selection
-          |
-          +--> Qwen2.5-VL OCR
-          +--> Qwen2.5-VL caption
-          +--> CLIP DFN5B embedding
-          +--> SigLIP2 embedding
-          +--> Whisper ASR + temporal alignment
-          |
-          v
-[Indexing]
-  Milvus / Elasticsearch / Redis
+[Minimal local artifact layer]
+  frames.csv or frame catalog
+  -> video_id / frame_id / timestamp / image_ref
+  -> CLIP vectors loaded into FAISS
+  -> OCR/ASR/caption/metadata loaded into SQLite/FTS
           |
           v
 [Query Orchestration]
   query understanding -> routing -> retrieval -> fusion -> reranking
           |
-          +--> semantic retrieval
-          +--> OCR / metadata retrieval
-          +--> ASR retrieval
-          +--> image retrieval
+          +--> semantic retrieval (FAISS)
+          +--> lexical retrieval (SQLite / FTS)
           +--> temporal retrieval
-          +--> tracking
+          +--> metadata/object constraints
           |
           v
 [Verification]
-  nearby frame / QBE / crop / zoom / OCR / object / temporal checks
+  nearby frame / OCR / object / temporal checks
           |
           v
 [Task Output]
@@ -43,6 +34,29 @@
 [Submission]
   ranked answers -> CSV -> validator -> ZIP
 ```
+
+This is the default architecture for the local challenge setup. It intentionally avoids forcing the whole raw organizer archive or heavyweight production backends into the daily workflow.
+
+## Local implementation policy
+
+Use the following policy for this repository:
+
+- default: FAISS for vector search, SQLite/FTS for text search
+- optional: Milvus / Elasticsearch only when scale or operational constraints require it
+- optional: GPU-backed FAISS only when the local machine has suitable CUDA hardware and profiling shows a real latency benefit
+- do not add backend detection logic or pipeline branches that become complexity for the sake of completeness
+
+## GPU vs CPU recommendation
+
+For the organizer-provided artifact format, CPU is enough for the required search quality and speed. The primary cost is not the vector index itself but building and querying a large frame catalog with fusion and reranking.
+
+Use GPU only if:
+
+- the index is large enough that CPU latency becomes the bottleneck
+- repeated batch indexing or large-scale nearest-neighbor queries are being run often
+- the local machine has CUDA support and enough VRAM to make the speedup worthwhile
+
+Otherwise, `faiss-cpu` is the correct default and keeps the pipeline simpler, cheaper, and easier to reproduce on ordinary machines.
 
 ## Dependency direction
 

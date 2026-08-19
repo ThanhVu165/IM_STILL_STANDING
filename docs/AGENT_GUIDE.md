@@ -21,11 +21,13 @@ Do not silently turn a reference design into a competition rule.
 ## 3. Required conceptual pipeline
 
 ```text
-Raw video
+Organizer-provided artifacts
  -> keyframes
- -> OCR/caption/CLIP/SigLIP2/ASR
- -> aligned multimodal records
- -> Milvus/Elasticsearch/Redis
+ -> CLIP .npy vectors
+ -> metadata / object JSON
+ -> frames.csv or equivalent frame catalog
+ -> FAISS vector index
+ -> SQLite / SQLite FTS lexical index
  -> query understanding
  -> retrieval routing
  -> candidate retrieval
@@ -37,6 +39,8 @@ Raw video
  -> submission validation
 ```
 
+The default local path is artifact-first and intentionally avoids raw-video preprocessing unless the organizer bundle is incomplete.
+
 ## 4. Important model separation
 
 There are two CLIP roles:
@@ -45,6 +49,8 @@ There are two CLIP roles:
 - `CLIP DFN5B` 1024-d: retrieval embedding.
 
 Do not merge these roles in code or documentation without an explicit reason.
+
+For the current challenge setup, the repository should prefer the organizer-provided CLIP vectors unless a real-model path is explicitly enabled. The default is a local, deterministic fallback that is not meant to be treated as fully semantic OCR/ASR output.
 
 ## 5. Retrieval routing
 

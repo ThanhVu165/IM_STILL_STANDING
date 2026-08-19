@@ -19,13 +19,13 @@ def main() -> None:
     args = parser.parse_args()
 
     pipeline = VideoRetrievalPipeline(data_root=Path(args.data_root))
-    results = pipeline.query(
+    results = pipeline.query_frames(
         args.query,
         top_k=args.top_k,
         previous_query=args.previous_query,
         next_query=args.next_query,
     )
-    print(json.dumps([result.__dict__ for result in results], ensure_ascii=False, indent=2))
+    print(json.dumps(results, ensure_ascii=False, indent=2))
 
 
 if __name__ == "__main__":

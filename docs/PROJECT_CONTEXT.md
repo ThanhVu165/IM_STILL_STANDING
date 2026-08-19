@@ -10,41 +10,32 @@ The system is designed around three preliminary-round task types: TKIS, Q&A, and
 
 ```text
 OFFLINE
-Raw Video
- -> AutoShot
- -> shot segmentation
- -> sample every 8 frames
- -> CLIP ViT-L/14-quickgelu candidate embeddings
- -> relative L2 difference filtering (> 0.4)
- -> keyframes
- -> Qwen2.5-VL OCR
- -> Qwen2.5-VL caption / scene description
- -> CLIP DFN5B 1024-d
- -> SigLIP2 1152-d
- -> audio extraction
- -> Whisper timestamped ASR
- -> ASR/keyframe temporal alignment
- -> multimodal keyframe records
- -> Milvus + Elasticsearch + Redis
+Organizer-provided artifacts
+ -> keyframes directory
+ -> CLIP .npy vectors
+ -> metadata / object JSON
+ -> optional raw video if needed for validation only
+ -> build a shared frame catalog (video_id, frame_id, timestamp, image_ref)
+ -> load CLIP vectors into FAISS
+ -> load OCR / ASR / caption / metadata into SQLite or SQLite FTS
+ -> fuse semantic and lexical candidates with RRF
+ -> return ranked keyframe results with video_id, timestamp, and path
 
 ONLINE
 Query
  -> task/intent understanding
- -> optional query interpretation / expansion
  -> routing
  -> candidate retrieval
  -> fusion / RRF
  -> metadata/OCR/ASR filtering
  -> temporal reranking when relevant
- -> fine-grained reranking
- -> agent reasoning/planning when useful
- -> nearby-frame / query-by-example / OCR / object / crop / zoom verification
- -> optional user feedback / Rocchio refinement
  -> final verification
  -> task-specific output
  -> submission generation
  -> validator
 ```
+
+This repository's default local implementation intentionally favors the organizer-provided processed artifacts instead of forcing the raw organizer archive or a distributed backend into the daily workflow.
 
 ## C. Data representation
 
@@ -92,12 +83,9 @@ The video must be correct. Each event frame is checked against that event's own 
 
 ### Semantic retrieval
 
-Encode text/image queries with:
+Encode text/image queries with the available visual embedding model, starting from the organizer-provided CLIP vectors. The local default is FAISS over the CLIP embeddings.
 
-- CLIP DFN5B: 1024 dimensions
-- SigLIP2: 1152 dimensions
-
-Search each independently in Milvus and fuse ranked lists using RRF.
+If a stronger visual encoder is available later, it can be added as an optional second branch without reworking the core architecture.
 
 ### RRF
 
@@ -107,7 +95,7 @@ Use an explicit configurable `k`; the supplied Vortex reference uses values such
 
 ### Lexical / metadata retrieval
 
-Use Elasticsearch for:
+Use SQLite or SQLite FTS for:
 
 - OCR
 - caption
@@ -141,10 +129,22 @@ large candidate pool
  -> fusion
  -> reranking
  -> small candidate pool
- -> expensive visual/temporal/LLM verification
+ -> expensive visual/temporal verification
 ```
 
 The exact K values are implementation/configuration choices and must not be hard-coded into the project context as competition rules.
+
+## G. GPU vs CPU guidance
+
+For this repository and the current challenge setup, CPU execution is the default and recommended choice unless there is a clear measured bottleneck.
+
+Decision rule:
+
+- prefer `faiss-cpu` for the local challenge pipeline
+- adopt GPU-backed FAISS only when the corpus is very large and the throughput/latency benefit is demonstrable
+- keep the FAISS backend swappable so the software remains compatible with both CPU and GPU deployments
+
+This keeps the system cheap, reproducible, and aligned with the organizer-provided artifact-first workflow.
 
 ## G. Agent layer
 
