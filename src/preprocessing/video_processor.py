@@ -232,6 +232,21 @@ class VisionCaptionOCR(OCRCaptioner):
             caption = processor.decode(generated_ids[0], skip_special_tokens=True).strip() or "scene"
             if "scene" not in caption.lower():
                 caption = f"scene {caption}"
+            # Attempt OCR using pytesseract if available when running real models.
+            ocr_text = ""
+            try:
+                import pytesseract
+
+                ocr_raw = pytesseract.image_to_string(image)
+                ocr_text = ocr_raw.strip()
+            except Exception:
+                # If real models are required, surface an explicit error so user can install OCR tooling.
+                if self.use_real_models:
+                    raise RuntimeError(
+                        "OCR toolchain (pytesseract) not available. Install pytesseract or provide a custom OCRCaptioner implementation."
+                    )
+                ocr_text = ""
+
             records.append(
                 KeyframeRecord(
                     video_id=Path(frame.image_ref).stem.split("#")[0] or f"video_{idx}",
@@ -239,7 +254,7 @@ class VisionCaptionOCR(OCRCaptioner):
                     timestamp=frame.timestamp,
                     image_ref=frame.image_ref,
                     caption=caption,
-                    ocr="",
+                    ocr=ocr_text,
                     metadata={"source": "vision-caption"},
                 )
             )
@@ -315,6 +330,12 @@ class DeterministicRetrievalEmbedder(RetrievalEmbedder):
             if feature_vector is None:
                 feature_vector = outputs.last_hidden_state.mean(dim=1)
         siglip_embedding = [float(value) for value in feature_vector.detach().flatten().tolist()]
+
+        # Enforce embedding dimension contracts for competition retrieval.
+        if len(clip_embedding) != 1024:
+            raise RuntimeError(f"CLIP embedding dimension mismatch: expected 1024, got {len(clip_embedding)}. Check model/config.")
+        if len(siglip_embedding) != 1152:
+            raise RuntimeError(f"SigLIP2 embedding dimension mismatch: expected 1152, got {len(siglip_embedding)}. Check model/config.")
 
         return [float(value) for value in clip_embedding], [float(value) for value in siglip_embedding]
 
