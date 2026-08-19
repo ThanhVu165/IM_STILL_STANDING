@@ -7,6 +7,7 @@ import json
 from dataclasses import asdict
 from pathlib import Path
 
+from src.indexing.build_service import build_artifact_index
 from src.retrieval.pipeline import VideoRetrievalPipeline
 from src.retrieval.tasks import PreliminaryTaskRunner, TaskQuery
 from src.submission import write_submission_bundle
@@ -22,6 +23,7 @@ def main() -> None:
     parser.add_argument("--event", action="append", default=[], help="Add one event query for a TRAKE task")
     parser.add_argument("--top-k", type=int, default=100)
     parser.add_argument("--data-root", default="data")
+    parser.add_argument("--build-index", action="store_true", help="Build artifact indexes before running query tasks")
     parser.add_argument("--output", default=None)
     parser.add_argument("--submission-dir", default=None, help="Optional directory to write submission/<query>.csv and submission.zip")
     parser.add_argument("--submission-zip", default=None, help="Optional explicit zip path for the submission bundle")
@@ -30,7 +32,9 @@ def main() -> None:
     parser.add_argument("--internal-zero-based", action="store_true", help="Convert internal zero-based frame ids to external one-based numbering at export")
     args = parser.parse_args()
 
-    pipeline = VideoRetrievalPipeline(data_root=args.data_root)
+    if args.build_index:
+        build_artifact_index(data_root=args.data_root)
+    pipeline = VideoRetrievalPipeline(data_root=args.data_root, load_index_only=True)
     runner = PreliminaryTaskRunner(pipeline=pipeline)
     task = TaskQuery(
         query_id=args.query_id,

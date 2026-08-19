@@ -6,6 +6,7 @@ import argparse
 import json
 from pathlib import Path
 
+from src.indexing.build_service import build_artifact_index
 from src.retrieval.pipeline import VideoRetrievalPipeline
 
 
@@ -23,13 +24,9 @@ def main() -> None:
     index_root = data_root / "indexes"
     needs_build = args.build_index or not ((index_root / "video_keyframes.npy").exists() and (index_root / "video_keyframes.sqlite").exists())
 
-    pipeline = VideoRetrievalPipeline(
-        data_root=data_root,
-        load_index_only=not needs_build,
-        initialize_from_disk=False if needs_build else True,
-    )
     if needs_build:
-        pipeline.build_index()
+        build_artifact_index(data_root=data_root)
+    pipeline = VideoRetrievalPipeline(data_root=data_root, load_index_only=True)
 
     results = pipeline.query_frames(
         args.query,

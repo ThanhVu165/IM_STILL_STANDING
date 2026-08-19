@@ -1,4 +1,5 @@
 from src.retrieval.pipeline import VideoRetrievalPipeline
+from src.indexing.build_service import build_artifact_index
 from src.schemas.video import KeyframeRecord
 
 
@@ -113,15 +114,16 @@ def test_video_retrieval_pipeline_can_load_persisted_index(tmp_path) -> None:
     assert results[0].frame_id == 1
 
 
-def test_retrieval_pipeline_can_defer_disk_loading_until_explicit_build(tmp_path) -> None:
+def test_retrieval_pipeline_uses_explicit_index_build_service(tmp_path) -> None:
     data_root = tmp_path / "data"
     keyframe_dir = data_root / "processed" / "keyframes" / "L21_V001"
     keyframe_dir.mkdir(parents=True, exist_ok=True)
     (keyframe_dir / "001.jpg").write_bytes(b"")
 
-    pipeline = VideoRetrievalPipeline(data_root=data_root, initialize_from_disk=False)
+    pipeline = VideoRetrievalPipeline(data_root=data_root)
     assert len(pipeline.items()) == 0
 
-    records = pipeline.build_index()
+    records = build_artifact_index(data_root=data_root)
     assert records
-    assert len(pipeline.items()) == 1
+    reloaded = VideoRetrievalPipeline(data_root=data_root, load_index_only=True)
+    assert len(reloaded.items()) == 1

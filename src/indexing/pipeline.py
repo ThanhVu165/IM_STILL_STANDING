@@ -30,10 +30,16 @@ class VideoIndexingPipeline:
         use_real_models: bool = False,
     ) -> None:
         self.preprocessor = preprocessor or AICVideoPipeline(use_real_models=use_real_models)
-        self.vector_index = FaissVectorAdapter(milvus_client if milvus_client is not None else {}, collection_name)
+        index_root = Path("data") / "indexes"
+        index_root.mkdir(parents=True, exist_ok=True)
+        self.vector_index = FaissVectorAdapter(
+            milvus_client if milvus_client is not None else str(index_root / f"{collection_name}.npy"),
+            collection_name,
+        )
         self.text_index = SQLiteTextAdapter(
-            elasticsearch_client if elasticsearch_client is not None else {},
+            elasticsearch_client if elasticsearch_client is not None else None,
             index_name,
+            db_path=index_root / f"{index_name}.sqlite",
         )
         self.redis_cache = RedisResultCache(redis_client if redis_client is not None else {})
         self.collection_name = collection_name
