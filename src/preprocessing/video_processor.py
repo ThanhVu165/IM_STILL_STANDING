@@ -445,8 +445,8 @@ class VideoPreprocessor:
         embedded = list(self.retrieval_embedder.embed(annotated))
         asr_segments = list(self.asr_processor.transcribe(video_path))
         aligned = list(self.temporal_aligner.align(embedded, asr_segments))
-        # Shot detection was removed; return empty shot list and aligned keyframes.
-        return [], aligned
+        # Automatic AutoShot detection removed; return deterministic coarse chunks as shots for compatibility.
+        return _coarse_shot_fallback(video_path), aligned
 
 
 class AICVideoPipeline:
@@ -545,6 +545,7 @@ class AICVideoPipeline:
     @property
     def stages(self) -> list[str]:
         return [
+            "AutoShot shot detection",
             "sample every 8 frames",
             "CLIP ViT-L/14-quickgelu candidate embeddings",
             "relative L2 filtering (> 0.4)",
@@ -573,8 +574,8 @@ class AICVideoPipeline:
         with_embeddings = list(self.retrieval_embedder.embed(with_ocr))
         asr_segments = list(self.asr_processor.transcribe(video_path))
         records = list(self.temporal_aligner.align(with_embeddings, asr_segments))
-        # Do not run automatic shot detection; prefer organizer-provided shots.
-        return [], records
+        # Automatic AutoShot detection removed; return deterministic coarse chunks as shots for compatibility.
+        return _coarse_shot_fallback(video_path), records
 
     def run(
         self,
