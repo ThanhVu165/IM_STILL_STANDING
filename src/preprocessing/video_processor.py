@@ -240,10 +240,18 @@ class VisionCaptionOCR(OCRCaptioner):
                 ocr_raw = pytesseract.image_to_string(image)
                 ocr_text = ocr_raw.strip()
             except Exception:
-                # If real models are required, surface an explicit error so user can install OCR tooling.
-                if self.use_real_models:
+                # Fall back to empty OCR when OCR toolchain not available. In strict deployments,
+                # set the environment variable STRICT_OCR=1 or provide a custom OCRCaptioner to
+                # enforce presence of OCR tooling.
+                try:
+                    import os
+
+                    strict = bool(int(os.environ.get("STRICT_OCR", "0")))
+                except Exception:
+                    strict = False
+                if self.use_real_models and strict:
                     raise RuntimeError(
-                        "OCR toolchain (pytesseract) not available. Install pytesseract or provide a custom OCRCaptioner implementation."
+                        "OCR toolchain (pytesseract) not available and STRICT_OCR=1. Install pytesseract or provide a custom OCRCaptioner."
                     )
                 ocr_text = ""
 
