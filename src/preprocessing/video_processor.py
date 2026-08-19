@@ -33,19 +33,42 @@ class ASRSegment:
     text: str
 
 
+def _video_id_from_path(video_path: str) -> str:
+    return Path(video_path).stem
+
+
 def _fallback_sample(video_path: str, step: int = 8) -> Sequence[FrameSample]:
     path = Path(video_path)
+    video_id = _video_id_from_path(video_path)
     if path.is_dir():
         files = sorted(p for p in path.iterdir() if p.suffix.lower() in {".jpg", ".jpeg", ".png", ".bmp"})
         if not files:
-            return [FrameSample(frame_index=i, timestamp=i / 30.0, image_ref=str(path / f"frame_{i:04d}.jpg")) for i in range(0, 32, step)]
+            return [
+                FrameSample(
+                    video_id=video_id,
+                    frame_index=i,
+                    timestamp=i / 30.0,
+                    image_ref=str(path / f"frame_{i:04d}.jpg"),
+                )
+                for i in range(0, 32, step)
+            ]
         return [
-            FrameSample(frame_index=index * step, timestamp=index * step / 30.0, image_ref=str(file_path))
+            FrameSample(
+                video_id=video_id,
+                frame_index=index * step,
+                timestamp=index * step / 30.0,
+                image_ref=str(file_path),
+            )
             for index, file_path in enumerate(files[::step])
         ]
 
     return [
-        FrameSample(frame_index=index, timestamp=index / 30.0, image_ref=f"{video_path}#frame={index}")
+        FrameSample(
+            video_id=video_id,
+            frame_index=index,
+            timestamp=index / 30.0,
+            image_ref=f"{video_path}#frame={index}",
+        )
         for index in range(0, 32, step)
     ]
 
@@ -89,6 +112,7 @@ class OpenCVFrameSampler(FrameSampler):
 
     def sample(self, video_path: str, step: int = 8) -> Sequence[FrameSample]:
         path = Path(video_path)
+        video_id = _video_id_from_path(video_path)
         if not path.is_file() or path.suffix.lower() not in {".mp4", ".avi", ".mov", ".mkv", ".webm", ".m4v"}:
             return _fallback_sample(video_path, step=step)
 
@@ -109,6 +133,7 @@ class OpenCVFrameSampler(FrameSampler):
                 if frame_index % step == 0:
                     samples.append(
                         FrameSample(
+                            video_id=video_id,
                             frame_index=frame_index,
                             timestamp=frame_index / fps if fps > 0 else len(samples) / 30.0,
                             image_ref=f"{video_path}#frame={frame_index}",
@@ -234,7 +259,7 @@ class VisionCaptionOCR(OCRCaptioner):
                 caption = f"scene {caption}"
             records.append(
                 KeyframeRecord(
-                    video_id=Path(frame.image_ref).stem.split("#")[0] or f"video_{idx}",
+                    video_id=frame.video_id or Path(frame.image_ref).stem.split("#")[0] or f"video_{idx}",
                     frame_id=frame.frame_index,
                     timestamp=frame.timestamp,
                     image_ref=frame.image_ref,
@@ -583,9 +608,13 @@ class AICVideoPipeline:
         *,
         output_dir: str | Path | None = None,
         write_json: bool = True,
+        preprocessed: tuple[list[ShotRecord], list[KeyframeRecord]] | None = None,
     ) -> dict[str, Any]:
         """Execute the full offline AIC processing flow and return a JSON-serializable manifest."""
-        shots, records = self.process(video_path)
+        if preprocessed is None:
+            shots, records = self.process(video_path)
+        else:
+            shots, records = preprocessed
         manifest: dict[str, Any] = {
             "video_path": str(video_path),
             "use_real_models": bool(self.use_real_models),

@@ -30,8 +30,8 @@ class VideoIndexingPipeline:
         use_real_models: bool = True,
     ) -> None:
         self.preprocessor = preprocessor or AICVideoPipeline(use_real_models=use_real_models)
-        self.milvus = FaissVectorAdapter(milvus_client if milvus_client is not None else {}, collection_name)
-        self.elasticsearch = SQLiteTextAdapter(
+        self.vector_index = FaissVectorAdapter(milvus_client if milvus_client is not None else {}, collection_name)
+        self.text_index = SQLiteTextAdapter(
             elasticsearch_client if elasticsearch_client is not None else {},
             index_name,
         )
@@ -39,22 +39,38 @@ class VideoIndexingPipeline:
         self.collection_name = collection_name
         self.index_name = index_name
         self.cache_prefix = cache_prefix
+        # Backward compatible aliases for existing callers.
+        self.milvus = self.vector_index
+        self.elasticsearch = self.text_index
+
+    def _cache_key(self, video_path: str) -> str:
+        return f"{self.cache_prefix}{Path(video_path).stem}"
+
+    def index_records(
+        self,
+        video_path: str,
+        shots: list[ShotRecord],
+        records: list[KeyframeRecord],
+    ) -> None:
+        if not records:
+            return
+        self.vector_index.upsert(records)
+        self.text_index.upsert(records)
+        self.redis_cache.set(
+            self._cache_key(video_path),
+            {
+                "video_path": video_path,
+                "video_id": Path(video_path).stem,
+                "shot_count": len(shots),
+                "keyframe_count": len(records),
+                "frame_ids": [record.frame_id for record in records],
+            },
+            ttl_seconds=3600,
+        )
 
     def index_video(self, video_path: str) -> tuple[list[ShotRecord], list[KeyframeRecord]]:
         shots, records = self.preprocessor.process(video_path)
-        if records:
-            self.milvus.upsert(records)
-            self.elasticsearch.upsert(records)
-            self.redis_cache.set(
-                f"{self.cache_prefix}{Path(video_path).stem}",
-                {
-                    "video_path": video_path,
-                    "shot_count": len(shots),
-                    "keyframe_count": len(records),
-                    "frame_ids": [record.frame_id for record in records],
-                },
-                ttl_seconds=3600,
-            )
+        self.index_records(video_path, shots, records)
         return shots, records
 
     def run(
@@ -63,9 +79,14 @@ class VideoIndexingPipeline:
         *,
         output_dir: str | Path | None = None,
         write_json: bool = True,
+        preprocessed: tuple[list[ShotRecord], list[KeyframeRecord]] | None = None,
     ) -> dict[str, Any]:
         """Run end-to-end preprocessing and ingestion into the configured stores."""
-        shots, records = self.index_video(video_path)
+        if preprocessed is None:
+            shots, records = self.index_video(video_path)
+        else:
+            shots, records = preprocessed
+            self.index_records(video_path, shots, records)
         manifest: dict[str, Any] = {
             "video_path": str(video_path),
             "shots": [asdict(shot) for shot in shots],
@@ -86,7 +107,7 @@ class VideoIndexingPipeline:
         return manifest
 
     def search_video(self, query: str, *, top_k: int = 10) -> list[Any]:
-        return list(self.elasticsearch.search(query, top_k, fields=("ocr", "caption", "asr")))
+        return list(self.text_index.search(query, top_k, fields=("ocr", "caption", "asr")))
 
     def cached_video(self, video_path: str) -> dict[str, Any] | None:
-        return self.redis_cache.get(f"{self.cache_prefix}{Path(video_path).stem}")
+        return self.redis_cache.get(self._cache_key(video_path))
