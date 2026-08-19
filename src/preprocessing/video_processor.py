@@ -123,71 +123,11 @@ class OpenCVFrameSampler(FrameSampler):
         return _fallback_sample(video_path, step=step)
 
 
-class AutoShotDetector(ShotDetector):
-    """Use OpenCV frame-difference heuristics to detect shot boundaries."""
-
-    def detect(self, video_path: str) -> Sequence[ShotRecord]:
-        path = Path(video_path)
-        if not path.is_file() or path.suffix.lower() not in {".mp4", ".avi", ".mov", ".mkv", ".webm", ".m4v"}:
-            return _coarse_shot_fallback(video_path)
-
-        try:
-            import cv2
-
-            cap = cv2.VideoCapture(str(path))
-            if not cap.isOpened():
-                raise RuntimeError(f"Unable to open video: {video_path}")
-
-            fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
-            prev_gray: Any | None = None
-            shots: list[ShotRecord] = []
-            shot_start_frame = 0
-            shot_start_time = 0.0
-            frame_index = 0
-
-            while True:
-                ok, frame = cap.read()
-                if not ok:
-                    break
-                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-                if prev_gray is not None:
-                    diff = cv2.absdiff(gray, prev_gray)
-                    mean_change = float(np.mean(diff))
-                    if mean_change > 18.0:
-                        shots.append(
-                            ShotRecord(
-                                video_id=path.stem,
-                                shot_id=f"shot_{len(shots)}",
-                                start_time=shot_start_time,
-                                end_time=frame_index / fps,
-                                start_frame=shot_start_frame,
-                                end_frame=frame_index,
-                            )
-                        )
-                        shot_start_frame = frame_index
-                        shot_start_time = frame_index / fps
-                prev_gray = gray
-                frame_index += 1
-            cap.release()
-
-            if not shots:
-                shots.append(
-                    ShotRecord(
-                        video_id=path.stem,
-                        shot_id="shot_0",
-                        start_time=0.0,
-                        end_time=max(0.0, (frame_index - 1) / fps if fps > 0 else 0.0),
-                        start_frame=0,
-                        end_frame=max(0, frame_index - 1),
-                    )
-                )
-            else:
-                last = shots[-1]
-                last.end_time = max(last.end_time, max(0.0, (frame_index - 1) / fps if fps > 0 else 0.0))
-                last.end_frame = max(last.end_frame, max(0, frame_index - 1))
-            return shots
-        except Exception:
-            return _coarse_shot_fallback(video_path)
+# AutoShotDetector removed — organizer-artifact-first pipeline
+# Shot detection implementation was removed to enforce "artifact-first" behavior.
+# Use organizer-provided shot metadata (if present) or request explicit shot segmentation
+# via a dedicated utility. Coarse chunking remains available in _coarse_shot_fallback
+# for diagnostics but is no longer invoked automatically in the main processing flow.
 
 
 def _coarse_shot_fallback(video_path: str) -> Sequence[ShotRecord]:
@@ -505,7 +445,8 @@ class VideoPreprocessor:
         embedded = list(self.retrieval_embedder.embed(annotated))
         asr_segments = list(self.asr_processor.transcribe(video_path))
         aligned = list(self.temporal_aligner.align(embedded, asr_segments))
-        return _coarse_shot_fallback(video_path), aligned
+        # Shot detection was removed; return empty shot list and aligned keyframes.
+        return [], aligned
 
 
 class AICVideoPipeline:
@@ -604,7 +545,6 @@ class AICVideoPipeline:
     @property
     def stages(self) -> list[str]:
         return [
-            "AutoShot shot detection",
             "sample every 8 frames",
             "CLIP ViT-L/14-quickgelu candidate embeddings",
             "relative L2 filtering (> 0.4)",
@@ -633,7 +573,8 @@ class AICVideoPipeline:
         with_embeddings = list(self.retrieval_embedder.embed(with_ocr))
         asr_segments = list(self.asr_processor.transcribe(video_path))
         records = list(self.temporal_aligner.align(with_embeddings, asr_segments))
-        return _coarse_shot_fallback(video_path), records
+        # Do not run automatic shot detection; prefer organizer-provided shots.
+        return [], records
 
     def run(
         self,
@@ -665,8 +606,5 @@ class AICVideoPipeline:
         return manifest
 
 
-SyntheticFrameSampler = OpenCVFrameSampler
-BasicShotDetector = AutoShotDetector
-MockOCRCaptioner = VisionCaptionOCR
-SyntheticASRProcessor = WhisperASRProcessor
+# Deprecated aliases removed: pipeline enforces organizer-artifact-first behavior and real models.
 DeterministicTemporalAligner = TemporalAlignerImpl

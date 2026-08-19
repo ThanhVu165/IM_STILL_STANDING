@@ -200,3 +200,13 @@ Notes
 - If embeddings or CSVs are missing for some videos the retrieval loader will skip those videos; generate missing embeddings with the indexing pipeline.
 - ffmpeg/ffprobe are optional for verification but required if you plan to re-extract audio or run ASR.
 - Set HF_TOKEN in env to avoid HF throttling when downloading models.
+
+Recent project changes
+
+- Shot-detection code has been removed from the default processing flow. The pipeline now prioritizes organizer-provided shot metadata; automatic shot detection is deprecated and removed to avoid inconsistent segmentation across runs.
+- Synthetic/mock aliases have been removed; the pipeline enforces using real models. Tests and CI should use explicit test utilities if needed.
+- SQLite FTS5 support is attempted at runtime; when the local Python/SQLite build supports FTS5 the index will create a keyframes_fts table for faster lexical search. If FTS5 is unavailable, the system falls back to an in-process token-match search.
+
+FTS5 note
+
+If you want fast and accurate lexical search on large corpora, ensure your Python's sqlite3 is built with FTS5 enabled (commonly available in system packages). When available, the index will maintain the FTS table automatically.

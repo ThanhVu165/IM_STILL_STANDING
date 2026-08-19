@@ -36,6 +36,21 @@ class SQLiteTextAdapter:
             )
             """
         )
+        # Optional FTS5 support: create a virtual table if the SQLite build supports it.
+        self._fts_enabled = False
+        try:
+            # create a simple FTS5 table mirroring textual fields for faster lexical lookup when available
+            self._conn.execute(
+                """
+                CREATE VIRTUAL TABLE IF NOT EXISTS keyframes_fts USING fts5(
+                    video_id, frame_id, ocr, caption, asr, metadata_json, tokenize='unicode61'
+                )
+                """
+            )
+            self._fts_enabled = True
+        except Exception:
+            # FTS not available on this SQLite build; continue with simple token-match fallback
+            self._fts_enabled = False
 
     def _coerce_record(self, record: KeyframeRecord | dict[str, Any]) -> dict[str, Any]:
         if isinstance(record, KeyframeRecord):
@@ -108,6 +123,34 @@ class SQLiteTextAdapter:
                     json.dumps(doc.get("metadata") or {}, ensure_ascii=False),
                 ),
             )
+
+        # Maintain optional FTS5 table when available for faster lexical queries.
+        if getattr(self, "_fts_enabled", False):
+            for doc in docs:
+                try:
+                    self._conn.execute(
+                        "DELETE FROM keyframes_fts WHERE video_id = ? AND frame_id = ?",
+                        (str(doc.get("video_id", "")), int(doc.get("frame_id", 0))),
+                    )
+                except Exception:
+                    # If delete fails, continue — we'll try to insert anyway
+                    pass
+                try:
+                    self._conn.execute(
+                        "INSERT INTO keyframes_fts (video_id, frame_id, ocr, caption, asr, metadata_json) VALUES (?, ?, ?, ?, ?, ?)",
+                        (
+                            str(doc.get("video_id", "")),
+                            int(doc.get("frame_id", 0)),
+                            str(doc.get("ocr") or ""),
+                            str(doc.get("caption") or ""),
+                            str(doc.get("asr") or ""),
+                            json.dumps(doc.get("metadata") or {}, ensure_ascii=False),
+                        ),
+                    )
+                except Exception:
+                    # ignore FTS insert errors for compatibility
+                    pass
+
         self._conn.commit()
 
     @staticmethod
@@ -127,6 +170,83 @@ class SQLiteTextAdapter:
         if not tokens:
             return []
 
+        results: list[RetrievalResult] = []
+
+        # If client is an in-memory dict (tests/local), use that
+        if isinstance(self._client, dict):
+            docs = [dict(doc) for doc in self._client.get(self.index_name, [])]
+            scored: list[tuple[float, dict[str, Any]]] = []
+            for doc in docs:
+                score = 0.0
+                for field in fields:
+                    value = doc.get(field) or ""
+                    if isinstance(value, dict):
+                        text = " ".join(str(fragment) for fragment in value.values())
+                    else:
+                        text = str(value)
+                    text = text.lower()
+                    score += sum(1 for token in tokens if token in text)
+                if score > 0:
+                    scored.append((float(score), doc))
+            scored.sort(key=lambda item: item[0], reverse=True)
+            for rank, (score_value, doc) in enumerate(scored[: max(0, top_k)], start=1):
+                results.append(
+                    RetrievalResult(
+                        video_id=str(doc.get("video_id", "")),
+                        frame_id=int(doc.get("frame_id", 0)),
+                        score=float(score_value),
+                        source="sqlite",
+                        timestamp=float(doc.get("timestamp")) if doc.get("timestamp") is not None else None,
+                        rank=rank,
+                        metadata={"fields": tuple(fields)},
+                    )
+                )
+            return results
+
+        # Prefer FTS5 matches when available, falling back to table scan
+        if getattr(self, "_fts_enabled", False):
+            try:
+                query_str = query
+                cur = self._conn.execute(
+                    "SELECT video_id, frame_id, ocr, caption, asr, metadata_json FROM keyframes_fts WHERE keyframes_fts MATCH ? LIMIT ?",
+                    (query_str, top_k),
+                )
+                rows = cur.fetchall()
+                scored: list[tuple[float, dict[str, Any]]] = []
+                for row in rows:
+                    video_id = row[0]
+                    frame_id = int(row[1]) if row[1] is not None and str(row[1]).isdigit() else 0
+                    ocr = row[2] or ""
+                    caption = row[3] or ""
+                    asr = row[4] or ""
+                    metadata_json = row[5] or ""
+                    try:
+                        metadata = json.loads(metadata_json) if metadata_json else {}
+                    except Exception:
+                        metadata = {}
+                    haystack = " ".join([ocr, caption, asr, json.dumps(metadata, ensure_ascii=False)])
+                    score_val = sum(1 for token in tokens if token in haystack.lower())
+                    if score_val > 0:
+                        scored.append((float(score_val), {"video_id": video_id, "frame_id": frame_id, "timestamp": None, "ocr": ocr, "caption": caption, "asr": asr, "metadata": metadata}))
+                scored.sort(key=lambda item: item[0], reverse=True)
+                for rank, (score_value, doc) in enumerate(scored[: max(0, top_k)], start=1):
+                    results.append(
+                        RetrievalResult(
+                            video_id=str(doc.get("video_id", "")),
+                            frame_id=int(doc.get("frame_id", 0)),
+                            score=float(score_value),
+                            source="sqlite_fts",
+                            timestamp=None,
+                            rank=rank,
+                            metadata={"fields": tuple(fields)},
+                        )
+                    )
+                return results
+            except Exception:
+                # Fall through to table scan on any FTS error
+                pass
+
+        # Table scan fallback (works everywhere)
         docs = self._iter_documents()
         scored: list[tuple[float, dict[str, Any]]] = []
         for doc in docs:
@@ -143,7 +263,6 @@ class SQLiteTextAdapter:
                 scored.append((float(score), doc))
 
         scored.sort(key=lambda item: item[0], reverse=True)
-        results: list[RetrievalResult] = []
         for rank, (score_value, doc) in enumerate(scored[: max(0, top_k)], start=1):
             results.append(
                 RetrievalResult(
