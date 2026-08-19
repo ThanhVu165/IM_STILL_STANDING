@@ -23,7 +23,11 @@ def main() -> None:
     index_root = data_root / "indexes"
     needs_build = args.build_index or not ((index_root / "video_keyframes.npy").exists() and (index_root / "video_keyframes.sqlite").exists())
 
-    pipeline = VideoRetrievalPipeline(data_root=data_root, load_index_only=not needs_build)
+    pipeline = VideoRetrievalPipeline(
+        data_root=data_root,
+        load_index_only=not needs_build,
+        initialize_from_disk=False if needs_build else True,
+    )
     if needs_build:
         pipeline.build_index()
 

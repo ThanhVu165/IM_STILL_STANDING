@@ -29,7 +29,11 @@ def main() -> None:
         }, ensure_ascii=False, indent=2))
         return
 
-    pipeline = VideoRetrievalPipeline(data_root=data_root, load_index_only=False)
+    pipeline = VideoRetrievalPipeline(
+        data_root=data_root,
+        load_index_only=False,
+        initialize_from_disk=False,
+    )
     records = pipeline.build_index()
     print(json.dumps({
         "status": "built",

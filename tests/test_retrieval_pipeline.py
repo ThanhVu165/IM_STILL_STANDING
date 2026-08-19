@@ -111,3 +111,17 @@ def test_video_retrieval_pipeline_can_load_persisted_index(tmp_path) -> None:
     assert results
     assert results[0].video_id == "L21_V001"
     assert results[0].frame_id == 1
+
+
+def test_retrieval_pipeline_can_defer_disk_loading_until_explicit_build(tmp_path) -> None:
+    data_root = tmp_path / "data"
+    keyframe_dir = data_root / "processed" / "keyframes" / "L21_V001"
+    keyframe_dir.mkdir(parents=True, exist_ok=True)
+    (keyframe_dir / "001.jpg").write_bytes(b"")
+
+    pipeline = VideoRetrievalPipeline(data_root=data_root, initialize_from_disk=False)
+    assert len(pipeline.items()) == 0
+
+    records = pipeline.build_index()
+    assert records
+    assert len(pipeline.items()) == 1

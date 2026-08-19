@@ -80,3 +80,14 @@ def test_run_pipeline_reuses_preprocessed_records_for_indexing(tmp_path: Path) -
     assert manifest["summary"]["keyframe_count"] == 1
     assert manifest["indexed"]["summary"]["keyframe_count"] == 1
     assert manifest["cache"]["keyframe_count"] == 1
+
+
+def test_run_pipeline_can_use_artifacts_without_raw_video_file(tmp_path: Path) -> None:
+    keyframe_dir = tmp_path / "processed" / "keyframes" / "L21_V099"
+    keyframe_dir.mkdir(parents=True, exist_ok=True)
+    (keyframe_dir / "001.jpg").write_bytes(b"")
+
+    manifest = run_pipeline("L21_V099", data_root=str(tmp_path), index_to_stores=False)
+
+    assert manifest["summary"]["keyframe_count"] == 1
+    assert manifest["video_path"] == "L21_V099"

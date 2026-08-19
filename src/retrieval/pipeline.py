@@ -62,6 +62,7 @@ class VideoRetrievalPipeline:
         index_root: str | Path | None = None,
         cache_prefix: str = "video_query:",
         load_index_only: bool = False,
+        initialize_from_disk: bool = True,
     ) -> None:
         self.data_root = Path(data_root) if data_root is not None else Path("data")
         self.index_root = Path(index_root) if index_root is not None else self.data_root / "indexes"
@@ -88,7 +89,7 @@ class VideoRetrievalPipeline:
             self._index_records(self._records)
         elif load_index_only:
             self._load_records_from_index()
-        else:
+        elif initialize_from_disk:
             self._load_records_from_disk()
             if self._records:
                 self._index_records(self._records)
@@ -156,6 +157,7 @@ class VideoRetrievalPipeline:
     def build_index(self) -> list[KeyframeRecord]:
         self._records = []
         self._records_by_video = defaultdict(list)
+        self._record_lookup = {}
         self._load_records_from_disk()
         if not self._records:
             return []
@@ -239,6 +241,12 @@ class VideoRetrievalPipeline:
         if not records:
             return
 
+        records_by_video: dict[str, list[KeyframeRecord]] = defaultdict(list)
+        for record in records:
+            records_by_video[str(record.video_id)].append(record)
+        for video_records in records_by_video.values():
+            video_records.sort(key=lambda item: int(item.frame_id))
+
         embeddings_roots = [
             root / "processed" / "embeddings",
             root / "artifacts" / "embeddings",
@@ -248,21 +256,22 @@ class VideoRetrievalPipeline:
         for embeddings_root in embeddings_roots:
             if not embeddings_root.exists():
                 continue
-            for candidate in sorted(embeddings_root.glob("*.npy")):
+            for candidate in sorted(embeddings_root.glob("**/*.npy")):
                 try:
                     array = np.load(candidate)
-                    embeddings = [np.asarray(row, dtype=float).tolist() for row in array] if array.ndim == 2 else []
+                    video_records = records_by_video.get(candidate.stem, [])
+                    if not video_records:
+                        continue
                     if array.ndim == 1:
                         vector = [float(value) for value in np.asarray(array).tolist()]
-                        for record in records:
-                            if record.video_id == candidate.stem:
-                                record.clip_embedding = vector
-                                record.siglip2_embedding = vector[: min(len(vector), 4)]
-                    elif embeddings:
-                        for index, record in enumerate(records):
-                            if record.video_id == candidate.stem and index < len(embeddings):
-                                record.clip_embedding = [float(value) for value in embeddings[index]]
-                except Exception:
+                        for record in video_records:
+                            record.clip_embedding = vector
+                            record.siglip2_embedding = vector[: min(len(vector), 4)]
+                    elif array.ndim == 2:
+                        limit = min(len(video_records), int(array.shape[0]))
+                        for index in range(limit):
+                            video_records[index].clip_embedding = [float(value) for value in np.asarray(array[index], dtype=float).tolist()]
+                except (ValueError, TypeError, OSError):
                     continue
 
         metadata_dir = root / "metadata"
@@ -276,16 +285,18 @@ class VideoRetrievalPipeline:
                     continue
                 if not isinstance(payload, dict):
                     continue
-                for record in records:
-                    if record.video_id == metadata_file.stem:
-                        if record.metadata is None:
-                            record.metadata = {}
-                        record.metadata.update(payload)
+                for record in records_by_video.get(metadata_file.stem, []):
+                    if record.metadata is None:
+                        record.metadata = {}
+                    record.metadata.update(payload)
 
         objects_root = root / "processed" / "objects"
         if not objects_root.exists():
             objects_root = root / "objects"
         if objects_root.exists():
+            record_lookup: dict[tuple[str, int], KeyframeRecord] = {}
+            for record in records:
+                record_lookup[(str(record.video_id), int(record.frame_id))] = record
             for video_dir in sorted(objects_root.iterdir()):
                 if not video_dir.is_dir():
                     continue
@@ -295,12 +306,11 @@ class VideoRetrievalPipeline:
                     frame_id = int(object_file.stem) if object_file.stem.isdigit() else 0
                     try:
                         payload = json.loads(object_file.read_text(encoding="utf-8"))
-                    except Exception:
+                    except (ValueError, OSError):
                         continue
-                    for record in records:
-                        if record.video_id == video_dir.name and record.frame_id == frame_id:
-                            record.objects = payload if isinstance(payload, list) else [payload]
-                            break
+                    record = record_lookup.get((video_dir.name, frame_id))
+                    if record is not None:
+                        record.objects = payload if isinstance(payload, list) else [payload]
 
         self._records = records
         self._rebuild_record_maps()
