@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from dataclasses import asdict
 
 from src.retrieval.pipeline import VideoRetrievalPipeline
 from src.retrieval.tasks import PreliminaryTaskRunner, TaskQuery
@@ -17,7 +18,7 @@ def main() -> None:
     parser.add_argument("--previous-query", default=None)
     parser.add_argument("--next-query", default=None)
     parser.add_argument("--event", action="append", default=[], help="Add one event query for a TRAKE task")
-    parser.add_argument("--top-k", type=int, default=10)
+    parser.add_argument("--top-k", type=int, default=100)
     parser.add_argument("--data-root", default="data")
     parser.add_argument("--output", default=None)
     args = parser.parse_args()
@@ -31,10 +32,17 @@ def main() -> None:
         previous_query=args.previous_query,
         next_query=args.next_query,
         event_queries=list(args.event),
+        top_k=args.top_k,
     )
     try:
-        ranked, submission = runner.run_task(task)
-        payload = {"ranked_answer": ranked.__dict__, "submission": submission.__dict__}
+        ranked_items = runner.run_task_ranked(task, top_k=args.top_k)
+        payload = {
+            "task": args.task,
+            "query_id": args.query_id,
+            "result_count": len(ranked_items),
+            "ranked_answers": [asdict(ranked) for ranked, _ in ranked_items],
+            "submissions": [asdict(submission) for _, submission in ranked_items],
+        }
     except ValueError as exc:
         payload = {"error": str(exc), "task": args.task, "query_id": args.query_id}
         if args.output:

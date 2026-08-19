@@ -83,6 +83,7 @@ class VideoRetrievalPipeline:
         self.cache_prefix = cache_prefix
         self._records: list[KeyframeRecord] = list(records) if records is not None else []
         self._records_by_video: dict[str, list[KeyframeRecord]] = defaultdict(list)
+        self._record_lookup: dict[tuple[str, int], KeyframeRecord] = {}
         if records is not None:
             self._index_records(self._records)
         elif load_index_only:
@@ -92,17 +93,26 @@ class VideoRetrievalPipeline:
             if self._records:
                 self._index_records(self._records)
 
+    def _rebuild_record_maps(self) -> None:
+        self._records_by_video = defaultdict(list)
+        self._record_lookup = {}
+        for record in self._records:
+            video_id = str(record.video_id)
+            frame_id = int(record.frame_id)
+            self._records_by_video[video_id].append(record)
+            self._record_lookup[(video_id, frame_id)] = record
+
     def _index_records(self, records: Sequence[KeyframeRecord]) -> None:
-        for record in records:
-            self._records_by_video[str(record.video_id)].append(record)
-        self.milvus.upsert(records)
-        self.elasticsearch.upsert(records)
+        self._records = list(records)
+        self._rebuild_record_maps()
+        self.milvus.upsert(self._records)
+        self.elasticsearch.upsert(self._records)
 
     def _load_records_from_index(self) -> None:
         vector_docs = list(getattr(self.milvus, "_documents", []))
         if not vector_docs:
             self._records = []
-            self._records_by_video = defaultdict(list)
+            self._rebuild_record_maps()
             return
 
         key_to_record: dict[tuple[str, int], KeyframeRecord] = {}
@@ -141,9 +151,7 @@ class VideoRetrievalPipeline:
             key_to_record[key] = record
 
         self._records = list(key_to_record.values())
-        self._records_by_video = defaultdict(list)
-        for record in self._records:
-            self._records_by_video[str(record.video_id)].append(record)
+        self._rebuild_record_maps()
 
     def build_index(self) -> list[KeyframeRecord]:
         self._records = []
@@ -295,7 +303,7 @@ class VideoRetrievalPipeline:
                             break
 
         self._records = records
-        self._index_records(records)
+        self._rebuild_record_maps()
 
     @staticmethod
     def _score_text_match(text: str, query_tokens: set[str]) -> float:
@@ -490,19 +498,13 @@ class VideoRetrievalPipeline:
         results = self.query(query, top_k=top_k, previous_query=previous_query, next_query=next_query)
         payload: list[dict[str, Any]] = []
         for result in results:
+            matched = self._record_lookup.get((str(result.video_id), int(result.frame_id)))
             payload.append(
                 {
                     "video_id": result.video_id,
                     "frame_id": result.frame_id,
                     "timestamp": result.timestamp,
-                    "path": next(
-                        (
-                            item.image_ref
-                            for item in self._records
-                            if str(item.video_id) == str(result.video_id) and int(item.frame_id) == int(result.frame_id)
-                        ),
-                        "",
-                    ),
+                    "path": matched.image_ref if matched is not None else "",
                     "score": result.score,
                     "source": result.source,
                     "rank": result.rank,

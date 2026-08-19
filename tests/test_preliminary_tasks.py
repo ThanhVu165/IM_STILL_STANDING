@@ -1,5 +1,6 @@
 from src.retrieval.pipeline import VideoRetrievalPipeline
 from src.retrieval.tasks import PreliminaryTaskRunner, TaskQuery
+from src.schemas.retrieval import RetrievalResult
 from src.schemas.video import KeyframeRecord
 
 
@@ -119,3 +120,61 @@ def test_task_runner_supports_task_query_wrapper() -> None:
 
     assert ranked.video_id == "L21_V005"
     assert submission.frame_id == 50
+
+
+def test_task_query_top_k_is_applied_in_ranked_results() -> None:
+    records = [
+        KeyframeRecord(
+            video_id="L21_V006",
+            frame_id=60,
+            timestamp=60.0,
+            image_ref="/tmp/first.jpg",
+            caption="red shirt on stage",
+            asr="red shirt on stage",
+            clip_embedding=[1.0, 0.0, 0.0],
+            siglip2_embedding=[1.0, 0.0, 0.0],
+        ),
+        KeyframeRecord(
+            video_id="L21_V006",
+            frame_id=61,
+            timestamp=61.0,
+            image_ref="/tmp/second.jpg",
+            caption="red shirt on stage",
+            asr="red shirt on stage",
+            clip_embedding=[0.9, 0.1, 0.0],
+            siglip2_embedding=[0.9, 0.1, 0.0],
+        ),
+    ]
+    runner = PreliminaryTaskRunner(pipeline=VideoRetrievalPipeline(records=records))
+    task = TaskQuery(query_id="q5", task_type="tkis", query="red shirt", top_k=1)
+
+    ranked_items = runner.run_task_ranked(task)
+
+    assert len(ranked_items) == 1
+    assert ranked_items[0][0].rank == 1
+
+
+def test_trake_ranked_prefers_video_with_event_coverage() -> None:
+    class StubPipeline:
+        def __init__(self) -> None:
+            self._records_by_video = {}
+
+        def query(self, query: str, *, top_k: int = 10, previous_query=None, next_query=None):  # noqa: ANN001
+            if query == "event_1":
+                return [
+                    RetrievalResult(video_id="v_a", frame_id=100, score=0.99, source="stub"),
+                    RetrievalResult(video_id="v_b", frame_id=10, score=0.80, source="stub"),
+                ][:top_k]
+            if query == "event_2":
+                return [
+                    RetrievalResult(video_id="v_c", frame_id=200, score=0.98, source="stub"),
+                    RetrievalResult(video_id="v_b", frame_id=20, score=0.79, source="stub"),
+                ][:top_k]
+            return []
+
+    runner = PreliminaryTaskRunner(pipeline=StubPipeline())  # type: ignore[arg-type]
+    ranked, submission = runner.run_trake("q6", ["event_1", "event_2"], top_k=2)
+
+    assert ranked.video_id == "v_b"
+    assert submission.video_id == "v_b"
+    assert submission.frames == [10, 20]
