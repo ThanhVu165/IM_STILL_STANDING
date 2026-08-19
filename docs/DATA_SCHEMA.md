@@ -175,3 +175,28 @@ frames: array<integer>
 ## 11. Frame convention
 
 The external competition representation starts at frame 1. Any internal zero-based index must be converted at the serialization boundary and tested.
+
+---
+
+Project-specific paths (example on your machine)
+
+- Raw videos: C:\IMLANGLAVANG\IM_STILL_STANDING\data\raw\videos
+- Keyframes (per-video folders): C:\IMLANGLAVANG\IM_STILL_STANDING\data\processed\keyframes\<VIDEO_ID>\001.jpg
+- Embeddings (per-video .npy): C:\IMLANGLAVANG\IM_STILL_STANDING\data\processed\embeddings\clip\<VIDEO_ID>.npy
+- Objects: C:\IMLANGLAVANG\IM_STILL_STANDING\data\processed\objects\<VIDEO_ID>\*.json
+- Metadata (per-video): C:\IMLANGLAVANG\IM_STILL_STANDING\data\metadata\<VIDEO_ID>.json
+- Map-keyframes CSVs: C:\IMLANGLAVANG\IM_STILL_STANDING\data\metadata\map-keyframes\<VIDEO_ID>.csv
+
+Verification script
+
+A helper script scripts/verify_data.py is provided to validate the above layout, check CSV headers, ensure referenced images exist, load sample .npy embeddings to validate shapes, parse metadata/object JSONs, probe a few raw videos via ffprobe (if available), and list any .sqlite files and their tables.
+
+Run example:
+
+python scripts\verify_data.py --data-root "C:\\IMLANGLAVANG\\IM_STILL_STANDING\\data"
+
+Notes
+
+- If embeddings or CSVs are missing for some videos the retrieval loader will skip those videos; generate missing embeddings with the indexing pipeline.
+- ffmpeg/ffprobe are optional for verification but required if you plan to re-extract audio or run ASR.
+- Set HF_TOKEN in env to avoid HF throttling when downloading models.
